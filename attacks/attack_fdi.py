@@ -243,7 +243,7 @@ class CompromisedEVSE(cp):
         print(f"  {YELLOW}[Phase 2]{RESET} CSMS shows 0 kW while attack shows 60 kW → FDI confirmed")
         print(f"  {RED}[Phase 3]{RESET} CSMS shows 999 kW while attack shows 0 kW → phantom load confirmed")
         print()
-        print(f"  Wireshark filter : websocket && ip.dst == 127.0.0.1")
+        print(f"  Wireshark filter : websocket && ip.dst == 172.19.0.10")
         print(f"  Look for         : MeterValues frames with value=0.0 and 999.0")
         print(f"  Key finding      : CSMS accepts all values with no validation")
         print()
@@ -265,11 +265,17 @@ async def main():
             await ws.send(CP_ID)
 
             evse = CompromisedEVSE(CP_ID, ws)
-            asyncio.create_task(evse.start())
+            start_task = asyncio.create_task(evse.start())
 
             await asyncio.sleep(0.1)   # let start() begin reading
 
             await evse.run_attack()
+
+            start_task.cancel()
+            try:
+                await start_task
+            except (asyncio.CancelledError, websockets.exceptions.ConnectionClosedOK):
+                pass
 
     except ConnectionRefusedError:
         print(f"Cannot connect to {CSMS_URL} — is csms_server4.py running?")

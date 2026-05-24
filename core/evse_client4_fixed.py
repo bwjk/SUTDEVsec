@@ -163,7 +163,7 @@ async def main():
         await ws.send("CP_1")
 
         evse = EVSE("CP_1", ws)
-        asyncio.create_task(evse.start())
+        start_task = asyncio.create_task(evse.start())
 
         await evse.send_boot()
 
@@ -174,13 +174,21 @@ async def main():
             ocpp_sender(queue, evse)
         )
 
+        start_task.cancel()
+        try:
+            await start_task
+        except (asyncio.CancelledError, websockets.exceptions.ConnectionClosedOK):
+            pass
+
 
 # Show the pandapower network diagram BEFORE asyncio starts.
 # plt.ion() makes the window non-blocking so the simulation can continue.
+import os
 import matplotlib.pyplot as plt
 net_preview, _ = create_net()
-plt.ion()
-pplt.simple_plot(net_preview, plot_line_switches=True)
-plt.pause(0.5)   # give the window time to render
+if os.environ.get('MPLBACKEND', '').lower() != 'agg':
+    plt.ion()
+    pplt.simple_plot(net_preview, plot_line_switches=True)
+    plt.pause(0.5)   # give the window time to render
 
 asyncio.run(main())

@@ -1,7 +1,12 @@
 import asyncio
+import logging
 import os
 import websockets
 from datetime import datetime, timezone
+
+# Docker Desktop's host-port proxy sends plain HTTP probes at startup;
+# websockets logs those as ERROR-level "opening handshake failed" noise.
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as cp
