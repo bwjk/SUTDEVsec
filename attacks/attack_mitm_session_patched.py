@@ -488,7 +488,7 @@ async def run_proxy():
     print(f"{BOLD}{RED}{'='*56}{RESET}")
     print(f"{BOLD}{RED}  EVSecSim PoC — MITM WebSocket Proxy{RESET}")
     print(f"{BOLD}{RED}{'='*56}{RESET}")
-    print(f"  Proxy listening on  : ws://127.0.0.1:{PROXY_PORT}")
+    print(f"  Proxy listening on  : ws://0.0.0.0:{PROXY_PORT}")
     print(f"  Forwarding to CSMS  : {CSMS_URL}")
     print(f"  Tamper phase starts : T+{TAMPER_DELAY_S}s after EVSE connects")
     print(f"  Injection at        : T+{INJECT_DELAY_S}s after EVSE connects")
