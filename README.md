@@ -22,40 +22,160 @@ The attacks target the same weaknesses documented by SaiFlow (2023) and Idaho Na
 
 ```
 SUTDEVsec/
+├── Dockerfile                   # Shared image for all services
+├── docker-compose.yml           # Full containerised topology
+├── .dockerignore
+├── requirements.txt
 ├── core/
 │   ├── csms_server4.py          # OCPP 1.6 CSMS (WebSocket server on port 9000)
 │   └── evse_client4_fixed.py    # Legitimate EVSE client + pandapower grid simulation
-├── attacks/
-│   ├── run_attacks.py           # Interactive orchestrator — runs all attacks in sequence
-│   ├── attack_saiflow_dos_patched.py   # Attack 1: SaiFlow duplicate-CP DoS
-│   ├── attack_fdi.py                   # Attack 2: MeterValues False Data Injection
-│   ├── attack_mitm_session_patched.py  # Attack 3: MITM WebSocket proxy + session hijack
-│   ├── attack_load_altering.py         # Attack 4: Coordinated botnet load altering
-│   └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
-└── requirements.txt.txt
+└── attacks/
+    ├── run_attacks.py                  # Interactive orchestrator (local use)
+    ├── attack_saiflow_dos_patched.py   # Attack 1: SaiFlow duplicate-CP DoS
+    ├── attack_fdi.py                   # Attack 2: MeterValues False Data Injection
+    ├── attack_mitm_session_patched.py  # Attack 3: MITM WebSocket proxy + session hijack
+    ├── attack_load_altering.py         # Attack 4: Coordinated botnet load altering
+    └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
 ```
 
 ---
 
-## Requirements
+## Containerised Network Topology
+
+Each component runs in its own container on a logically separate network segment, matching a realistic threat model where an external attacker can only reach the CSMS's exposed port and has no visibility into the internal operator network.
 
 ```
-ocpp==0.26
-websockets==10.4
-pandapower
-matplotlib
-plotly
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │                      public-net  ·  172.20.0.0/24                         │
+  │                                                                            │
+  │   ┌─────────────────────┐               ┌─────────────────────┐           │
+  │   │     atk-saiflow      │               │      atk-load        │           │
+  │   │     172.20.0.30      │               │     172.20.0.40      │           │
+  │   │  (Attack 1 — DoS)    │               │ (Attack 4 — Botnet)  │           │
+  │   └──────────┬───────────┘               └──────────┬──────────┘           │
+  │              │ ws://csms:9000                        │ ws://csms:9000       │
+  │              └───────────────────┬───────────────────┘                     │
+  │                                  ▼                                          │
+  │                       ┌──────────────────┐                                 │
+  │                       │       csms        │ ◄── :9000 published to host    │
+  │                       │   172.20.0.10     │                                 │
+  │                       └────────┬─────────┘                                 │
+  └────────────────────────────────│────────────────────────────────────────────┘
+                                   │  dual-homed
+  ┌────────────────────────────────│────────────────────────────────────────────┐
+  │              operator-net  ·  172.19.0.0/24  [internal, isolated]            │
+  │                                   │                                           │
+  │                       ┌───────────┴──────────┐                               │
+  │                       │         csms          │                               │
+  │                       │     172.19.0.10       │                               │
+  │                       └──┬──────────┬─────────┘                              │
+  │          ws://csms:9000  │          │          │                              │
+  │         ┌────────────────┘          │          └───────────────┐              │
+  │         ▼                           ▼                          ▼              │
+  │  ┌─────────────┐          ┌──────────────────┐       ┌──────────────────┐   │
+  │  │    evse      │          │     atk-fdi       │       │    atk-mitm      │   │
+  │  │ 172.19.0.20  │          │   172.19.0.30     │       │  172.19.0.40     │   │
+  │  │ (legit EVSE) │          │ (compromised EVSE)│       │  (proxy :9001)   │   │
+  │  └─────────────┘          └──────────────────┘       └────────┬─────────┘   │
+  │                                                                │               │
+  │                                                   ws://atk-mitm:9001          │
+  │                                                                │               │
+  │                                                  ┌────────────┴────────┐      │
+  │                                                  │    evse-via-mitm    │      │
+  │                                                  │    172.19.0.50      │      │
+  │                                                  └─────────────────────┘      │
+  └───────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Install dependencies:
+### Threat model per attack
+
+| Attack | Attacker position | Network | Can see operator-net? |
+|--------|-------------------|---------|----------------------|
+| 1 — SaiFlow DoS | External | public-net | No |
+| 2 — FDI | Compromised EVSE (insider) | operator-net | Yes |
+| 3 — MITM proxy | Compromised switch / ARP poison | operator-net | Yes |
+| 4 — Load altering | External botnet | public-net | No |
+
+---
+
+## Docker Deployment
+
+### Prerequisites
+
+- Docker Desktop (or Docker Engine + Compose plugin)
+
+### Build
 
 ```bash
-pip install ocpp==0.26 websockets==10.4 pandapower matplotlib plotly
+docker compose build
+```
+
+### Run scenarios
+
+```bash
+# Baseline — CSMS + legitimate EVSE only
+docker compose --profile normal up
+
+# Attack 1 — SaiFlow DoS  (external attacker + victim EVSE)
+docker compose --profile saiflow up
+
+# Attack 2 — False Data Injection  (compromised EVSE, no legit EVSE)
+docker compose --profile fdi up
+
+# Attack 3 — MITM proxy  (proxy intercepts EVSE traffic)
+docker compose --profile mitm up
+
+# Attack 4 — Coordinated load altering  (external botnet, 10 bots)
+docker compose --profile load up
+```
+
+### Follow logs
+
+```bash
+# All containers in a scenario
+docker compose --profile saiflow logs -f
+
+# Single container
+docker logs -f csms
+docker logs -f atk-saiflow
+```
+
+### Tear down
+
+```bash
+docker compose --profile <profile> down
+```
+
+### Capture traffic (Wireshark)
+
+The CSMS publishes port 9000 to the host. Capture locally:
+
+```bash
+# Linux/macOS
+tcpdump -i any -w capture.pcap port 9000
+
+# Inside a container (install tcpdump in Dockerfile if needed)
+docker exec -it csms tcpdump -i eth0 -w /tmp/capture.pcap
 ```
 
 ---
 
-## Quick Start
+## Local Quick Start (no Docker)
+
+### Requirements
+
+```
+ocpp==2.1.0
+websockets==16.0
+pandapower==3.4.0
+numpy==2.2.0
+matplotlib==3.10.0
+plotly==6.7.0
+```
+
+```bash
+pip install -r requirements.txt
+```
 
 ### Run all attacks interactively
 
@@ -72,7 +192,7 @@ The orchestrator opens each component in its own terminal window and prompts you
 # Terminal 1 — CSMS
 python core/csms_server4.py
 
-# Terminal 2 — Legitimate EVSE (connects to CSMS)
+# Terminal 2 — Legitimate EVSE
 python core/evse_client4_fixed.py
 
 # Terminal 2 (MITM variant) — EVSE via proxy
@@ -118,6 +238,8 @@ Three phases run automatically:
 
 ```bash
 python attacks/attack_fdi.py
+# or override target via env var:
+CSMS_URL=ws://127.0.0.1:9000 python attacks/attack_fdi.py
 ```
 
 **Root cause:** MeterValues are unsigned and unverified in OCPP 1.6.  
@@ -181,27 +303,10 @@ python attacks/attack_load_altering.py --bots 500    # full fleet takeover
 
 **Script:** `attacks/a6breakers.py`
 
-Builds the full grid twin (220 kV → 66 kV → 22 kV, 7 town loads × 200 MW, 500 EV chargers × 220 kW) and exports an interactive Plotly diagram to `grid_visualization.html`.
+Builds the full grid twin (220 kV → 66 kV → 22 kV, 7 town loads × 200 MW, 500 EV chargers × 220 kW) and exports an interactive Plotly diagram to `grid_visualization.html`. Run locally — not included in Docker profiles.
 
 ```bash
 python attacks/a6breakers.py
-```
-
----
-
-## Architecture
-
-```
-EVSE (evse_client4_fixed.py)
-  │  ws://127.0.0.1:9000  (normal)
-  │  ws://127.0.0.1:9001  (via MITM proxy)
-  ▼
-[MITM Proxy: port 9001]  ──────────────────────┐
-  │  ws://127.0.0.1:9000                        │ inject / tamper
-  ▼                                             │
-CSMS (csms_server4.py : port 9000) ◄───────────┘
-
-SaiFlow / FDI / Load attacks connect directly to port 9000
 ```
 
 ---

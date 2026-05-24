@@ -1,4 +1,5 @@
 import asyncio
+import os
 import websockets
 from datetime import datetime, timezone
 
@@ -84,8 +85,9 @@ async def handler(websocket):
 # MAIN SERVER
 # -----------------------------
 async def main():
-    server = await websockets.serve(handler, "127.0.0.1", 9000)
-    print("[CSMS] Running on ws://127.0.0.1:9000")
+    bind_host = os.environ.get("BIND_HOST", "0.0.0.0")
+    server = await websockets.serve(handler, bind_host, 9000)
+    print(f"[CSMS] Running on ws://{bind_host}:9000")
     await server.wait_closed()
 
 

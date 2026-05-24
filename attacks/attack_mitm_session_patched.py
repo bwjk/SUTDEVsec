@@ -104,6 +104,7 @@ CONFIGURABLE PARAMETERS
 """
 
 import asyncio
+import os
 import websockets
 import json
 import time
@@ -474,9 +475,10 @@ async def run_proxy():
         finally:
             state_store.pop(session_id, None)
 
+    proxy_bind = os.environ.get("PROXY_BIND", "0.0.0.0")
     server = await websockets.serve(
         handler,
-        "127.0.0.1",
+        proxy_bind,
         PROXY_PORT,
         ping_interval=None,
         ping_timeout=None,

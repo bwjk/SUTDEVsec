@@ -1,0 +1,10 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+logs/
+grid_visualization.html
+*.pcap
+*.html

@@ -70,6 +70,7 @@ WHAT TO LOOK FOR
 """
 
 import asyncio
+import os
 import websockets
 from datetime import datetime, timezone
 
@@ -80,7 +81,7 @@ from ocpp.v16.enums import RegistrationStatus
 # CONFIG — change these to suit your testbed
 # ===========================================================================
 
-CSMS_URL         = "ws://127.0.0.1:9000"
+CSMS_URL         = os.environ.get("CSMS_URL", "ws://127.0.0.1:9000")
 CP_ID            = "CP_1"          # pretend to be this charge point
 CONNECTOR_ID     = 1
 

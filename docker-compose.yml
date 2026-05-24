@@ -1,0 +1,146 @@
+# EVSecSim — containerised testbed
+#
+# Networks
+#   operator-net  172.19.0.0/24  internal, isolated — CSMS + EVSE live here
+#   public-net    172.20.0.0/24  external-facing    — attackers reach CSMS here
+#
+# The CSMS is dual-homed (both networks).
+# Attackers on public-net can only reach 172.20.0.10:9000.
+# They have zero visibility into operator-net.
+#
+# Usage:
+#   docker compose --profile normal   up   # CSMS + legitimate EVSE (baseline)
+#   docker compose --profile saiflow  up   # Attack 1 — SaiFlow DoS
+#   docker compose --profile fdi      up   # Attack 2 — False Data Injection
+#   docker compose --profile mitm     up   # Attack 3 — MITM proxy
+#   docker compose --profile load     up   # Attack 4 — coordinated load altering
+
+networks:
+  operator-net:
+    driver: bridge
+    internal: true          # no external routing — isolated operator segment
+    ipam:
+      config:
+        - subnet: 172.19.0.0/24
+
+  public-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+services:
+
+  # ── Core Infrastructure ─────────────────────────────────────────────────────
+  # CSMS is dual-homed: operator-net (EVSE comms) + public-net (attacker surface)
+
+  csms:
+    build: .
+    container_name: csms
+    hostname: csms
+    command: python core/csms_server4.py
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.10
+      public-net:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "9000:9000"         # expose to host for Wireshark / external tools
+
+  # ── Legitimate EVSE ─────────────────────────────────────────────────────────
+  # Used in: normal baseline, SaiFlow (victim role)
+
+  evse:
+    build: .
+    container_name: evse
+    hostname: evse
+    command: sh -c "sleep 2 && python core/evse_client4_fixed.py --url ws://csms:9000"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.20
+    depends_on:
+      - csms
+    profiles: [normal, saiflow]
+
+  # ── Attack 1 · SaiFlow DoS ──────────────────────────────────────────────────
+  # Threat model: external attacker, public-net only, reaches CSMS:9000
+
+  atk-saiflow:
+    build: .
+    container_name: atk-saiflow
+    hostname: atk-saiflow
+    command: >
+      sh -c "sleep 3 && python attacks/attack_saiflow_dos_patched.py
+             --url ws://csms:9000 --duration 60"
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      - csms
+    profiles: [saiflow]
+
+  # ── Attack 2 · False Data Injection ─────────────────────────────────────────
+  # Threat model: compromised EVSE already on operator-net (insider / supply chain)
+
+  atk-fdi:
+    build: .
+    container_name: atk-fdi
+    hostname: atk-fdi
+    command: sh -c "sleep 2 && python attacks/attack_fdi.py"
+    environment:
+      CSMS_URL: ws://csms:9000
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.30
+    depends_on:
+      - csms
+    profiles: [fdi]
+
+  # ── Attack 3 · MITM WebSocket Proxy ─────────────────────────────────────────
+  # Threat model: compromised network device on operator-net (ARP poisoning /
+  #               rogue switch firmware) — intercepts EVSE↔CSMS traffic
+
+  atk-mitm:
+    build: .
+    container_name: atk-mitm
+    hostname: atk-mitm
+    command: >
+      sh -c "sleep 2 && python attacks/attack_mitm_session_patched.py
+             --csms-url ws://csms:9000 --proxy-port 9001"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.40
+    depends_on:
+      - csms
+    profiles: [mitm]
+
+  evse-via-mitm:
+    build: .
+    container_name: evse-via-mitm
+    hostname: evse-via-mitm
+    command: >
+      sh -c "sleep 4 && python core/evse_client4_fixed.py
+             --url ws://atk-mitm:9001"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.50
+    depends_on:
+      - atk-mitm
+    profiles: [mitm]
+
+  # ── Attack 4 · Coordinated Load Altering ────────────────────────────────────
+  # Threat model: external botnet, public-net only, reaches CSMS:9000
+
+  atk-load:
+    build: .
+    container_name: atk-load
+    hostname: atk-load
+    command: >
+      sh -c "sleep 2 && python attacks/attack_load_altering.py
+             --bots 10 --url ws://csms:9000"
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.40
+    depends_on:
+      - csms
+    profiles: [load]
