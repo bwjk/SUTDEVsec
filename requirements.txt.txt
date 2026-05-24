@@ -1,3 +1,6 @@
-ocpp==0.26
-websockets==10.4
-asyncio
+ocpp==2.1.0
+websockets==16.0
+pandapower==3.4.0
+numpy==2.2.0
+matplotlib==3.10.0
+plotly==6.7.0
