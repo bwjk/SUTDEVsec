@@ -3,7 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Use non-interactive matplotlib backend — no display in containers
-ENV MPLBACKEND=Agg
+ENV MPLBACKEND=Agg \
+    PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

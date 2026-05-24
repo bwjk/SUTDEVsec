@@ -136,7 +136,7 @@ async def run_sim(queue):
             net.load.at[l, "scaling"] = 1 if random.random() < 0.5 else 0
 
         if t % 5 == 0:
-            pp.runpp(net)
+            pp.runpp(net, numba=False)
 
             for i, l in enumerate(loads):
                 p_kw = net.res_load.p_mw[l] * 1000
