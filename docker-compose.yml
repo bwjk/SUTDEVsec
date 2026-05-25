@@ -12,7 +12,8 @@
 #   docker compose --profile normal   up   # CSMS + legitimate EVSE (baseline)
 #   docker compose --profile saiflow  up   # Attack 1 — SaiFlow DoS
 #   docker compose --profile fdi      up   # Attack 2 — False Data Injection
-#   docker compose --profile mitm     up   # Attack 3 — MITM proxy
+#   docker compose --profile mitm     up   # Attack 3a — MITM proxy (INTERNAL, operator-net, ARP poisoning)
+#   docker compose --profile mitm-ext up   # Attack 3b — MITM proxy (EXTERNAL, public-net, BGP/DNS hijack)
 #   docker compose --profile load     up   # Attack 4 — coordinated load altering
 
 networks:
@@ -94,9 +95,9 @@ services:
       - csms
     profiles: [fdi]
 
-  # ── Attack 3 · MITM WebSocket Proxy ─────────────────────────────────────────
-  # Threat model: compromised network device on operator-net (ARP poisoning /
-  #               rogue switch firmware) — intercepts EVSE↔CSMS traffic
+  # ── Attack 3a · MITM WebSocket Proxy (INTERNAL) ────────────────────────────
+  # Threat model: attacker on operator-net (ARP poisoning / rogue switch) —
+  #               intercepts EVSE↔CSMS traffic from within the charging LAN
 
   atk-mitm:
     build: .
@@ -121,6 +122,35 @@ services:
     depends_on:
       - atk-mitm
     profiles: [mitm]
+
+  # ── Attack 3b · MITM WebSocket Proxy (EXTERNAL) ────────────────────────────
+  # Threat model: attacker on public-net (BGP hijacking / DNS poisoning /
+  #               rogue cloud proxy) — intercepts EVSE WAN path to cloud CSMS.
+  #               Attacker has NO access to operator-net.
+
+  atk-mitm-ext:
+    build: .
+    container_name: atk-mitm-ext
+    hostname: atk-mitm-ext
+    command: sh -c "sleep 2 && python attacks/attack_mitm_ext.py --csms-url ws://csms:9000 --proxy-port 9002"
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      - csms
+    profiles: [mitm-ext]
+
+  evse-via-mitm-ext:
+    build: .
+    container_name: evse-via-mitm-ext
+    hostname: evse-via-mitm-ext
+    command: sh -c "sleep 4 && python core/evse_client4_fixed.py --url ws://atk-mitm-ext:9002"
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.50
+    depends_on:
+      - atk-mitm-ext
+    profiles: [mitm-ext]
 
   # ── Attack 4 · Coordinated Load Altering ────────────────────────────────────
   # Threat model: external botnet, public-net only, reaches CSMS:9000
