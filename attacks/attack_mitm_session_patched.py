@@ -414,10 +414,12 @@ async def proxy_session(evse_ws, state: SessionState):
             injector_task.cancel()
             for task in pending:
                 task.cancel()
-            for task in list(pending) + [injector_task]:
+            for task in list(done) + list(pending) + [injector_task]:
                 try:
                     await task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError,
+                        websockets.exceptions.ConnectionClosedOK,
+                        websockets.exceptions.ConnectionClosedError):
                     pass
 
     except ConnectionRefusedError:
