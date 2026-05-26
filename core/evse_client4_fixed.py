@@ -1,4 +1,5 @@
 import asyncio
+import urllib.request
 import websockets
 import pandapower as pp
 import numpy as np
@@ -7,8 +8,10 @@ import argparse
 from datetime import datetime, timezone
 import pandapower.plotting as pplt
 
+from ocpp.routing import on
 from ocpp.v16 import ChargePoint as cp
-from ocpp.v16 import call
+from ocpp.v16 import call, call_result
+from ocpp.v16.enums import FirmwareStatus
 
 # -----------------------------
 # CLI — target URL
@@ -97,6 +100,68 @@ class EVSE(cp):
             }]
         )
         await self.call(request)
+
+    # ------------------------------------------------------------------
+    # UpdateFirmware handler — PoC #3 (INL/CON-23-72329)
+    # OCPP 1.6 provides no signature or hash on firmware updates.
+    # The EVSE downloads and executes whatever URL the CSMS supplies.
+    # ------------------------------------------------------------------
+    @on('UpdateFirmware')
+    async def on_update_firmware(self, location, retrieve_date, **kwargs):
+        print()
+        print(f"[EVSE] {'!'*46}")
+        print(f"[EVSE]  UpdateFirmware received from CSMS")
+        print(f"[EVSE]  location     : {location}")
+        print(f"[EVSE]  retrieve_date: {retrieve_date}")
+        print(f"[EVSE]  No signature check — OCPP 1.6 has none")
+        print(f"[EVSE] {'!'*46}")
+        print()
+        asyncio.create_task(self._execute_firmware_update(location))
+        return call_result.UpdateFirmware()
+
+    async def _execute_firmware_update(self, location: str):
+        await asyncio.sleep(1)
+
+        await self._send_firmware_status(FirmwareStatus.downloading)
+        print(f"[EVSE] Downloading firmware from {location} ...")
+        await asyncio.sleep(2)
+
+        # Fetch the payload over HTTP and print its contents
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(
+                None,
+                lambda: urllib.request.urlopen(location, timeout=10).read()
+            )
+            payload_text = data.decode("utf-8", errors="replace")
+            print()
+            print(f"[EVSE] {'='*52}")
+            print(f"[EVSE] Downloaded firmware ({len(data)} bytes):")
+            print(f"[EVSE] {'='*52}")
+            for line in payload_text.splitlines()[:25]:
+                print(f"[EVSE]   {line}")
+            print(f"[EVSE] {'='*52}")
+            print()
+        except Exception as exc:
+            print(f"[EVSE] HTTP fetch failed ({exc}) — simulating download")
+
+        await self._send_firmware_status(FirmwareStatus.downloaded)
+        print(f"[EVSE] Download complete — no integrity check performed")
+        await asyncio.sleep(1)
+
+        await self._send_firmware_status(FirmwareStatus.installing)
+        print(f"[EVSE] Installing firmware (executing payload as root) ...")
+        await asyncio.sleep(3)
+
+        await self._send_firmware_status(FirmwareStatus.installed)
+        print(f"[EVSE] Firmware install complete — EVSE now compromised")
+
+    async def _send_firmware_status(self, status: FirmwareStatus):
+        try:
+            await self.call(call.FirmwareStatusNotification(status=status))
+            print(f"[EVSE] FirmwareStatusNotification: {status}")
+        except Exception as exc:
+            print(f"[EVSE] FirmwareStatusNotification failed: {exc}")
 
 
 # ------------------

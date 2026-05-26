@@ -10,7 +10,7 @@ logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as cp
-from ocpp.v16.enums import RegistrationStatus
+from ocpp.v16.enums import RegistrationStatus, FirmwareStatus
 from ocpp.v16 import call_result
 
 
@@ -50,6 +50,11 @@ class CSMS(cp):
     # frame — including injected ones — so Phase 3 of the MITM attack
     # produced no visible output on this terminal.
     # ------------------------------------------------------------------
+    @on('FirmwareStatusNotification')
+    async def on_firmware_status(self, status, **kwargs):
+        print(f"[CSMS] {self.id} | FirmwareStatusNotification: {status}")
+        return call_result.FirmwareStatusNotification()
+
     @on('StopTransaction')
     async def on_stop_transaction(self, transaction_id, meter_stop,
                                    timestamp, **kwargs):

@@ -15,6 +15,7 @@
 #   docker compose --profile mitm     up   # Attack 3a — MITM proxy (INTERNAL, operator-net, ARP poisoning)
 #   docker compose --profile mitm-ext up   # Attack 3b — MITM proxy (EXTERNAL, public-net, BGP/DNS hijack)
 #   docker compose --profile load     up   # Attack 4 — coordinated load altering
+#   docker compose --profile firmware up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
 
 networks:
   operator-net:
@@ -166,3 +167,37 @@ services:
     depends_on:
       - csms
     profiles: [load]
+
+  # ── Attack 5 · Malicious Firmware Update ────────────────────────────────────
+  # Threat model: rogue CSMS on operator-net — EVSE connects to attacker instead
+  #               of the real CSMS (models DNS poisoning / compromised CSMS).
+  #               OCPP 1.6 has no firmware signature; EVSE installs any payload.
+  # NOTE: no real CSMS is started in this profile — atk-firmware IS the CSMS.
+
+  atk-firmware:
+    build: .
+    container_name: atk-firmware
+    hostname: atk-firmware
+    command: sh -c "sleep 1 && python attacks/attack_firmware.py --firmware-host atk-firmware --push-delay 10"
+    environment:
+      CSMS_PORT: 9000
+      PAYLOAD_PORT: 8080
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.30
+    ports:
+      - "9000:9000"   # EVSE connects here (rogue CSMS)
+      - "8080:8080"   # Payload visible on host for Wireshark / browser demo
+    profiles: [firmware]
+
+  evse-via-firmware:
+    build: .
+    container_name: evse-via-firmware
+    hostname: evse-via-firmware
+    command: sh -c "sleep 3 && python core/evse_client4_fixed.py --url ws://atk-firmware:9000"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.60
+    depends_on:
+      - atk-firmware
+    profiles: [firmware]
