@@ -74,7 +74,7 @@ Each component runs in its own container on a logically separate network segment
   │         ┌────────────────┘          │          └────────────────┐               │
   │         ▼                           ▼                           ▼               │
   │  ┌─────────────┐   ┌───────────────────┐   ┌──────────────────┐   ┌───────────────────┐  │
-  │  │    evse      │   │     atk-fdi        │   │    atk-mitm      │   │   atk-firmware    │  │
+  │  │    evse      │   │   evse-via-fdi     │   │    atk-mitm      │   │   atk-firmware    │  │
   │  │ 172.19.0.20  │   │   172.19.0.30      │   │  172.19.0.40     │   │   172.19.0.30     │  │
   │  │ (legit EVSE) │   │ (compromised EVSE) │   │  proxy :9001     │   │ rogue CSMS :9000  │  │
   │  └─────────────┘   └───────────────────┘   └────────┬─────────┘   │ payload HTTP :8080 │  │
@@ -142,7 +142,7 @@ docker compose --profile fdi logs -f
 
 # Individual containers
 docker logs -f csms
-docker logs -f atk-fdi
+docker logs -f evse-via-fdi
 docker logs -f atk-mitm
 docker logs -f atk-mitm-ext
 docker logs -f atk-firmware

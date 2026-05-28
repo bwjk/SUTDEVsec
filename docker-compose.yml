@@ -82,10 +82,10 @@ services:
   # ── Attack 2 · False Data Injection ─────────────────────────────────────────
   # Threat model: compromised EVSE already on operator-net (insider / supply chain)
 
-  atk-fdi:
+  evse-via-fdi:
     build: .
-    container_name: atk-fdi
-    hostname: atk-fdi
+    container_name: evse-via-fdi
+    hostname: evse-via-fdi
     command: sh -c "sleep 2 && python attacks/attack_fdi.py"
     environment:
       CSMS_URL: ws://csms:9000
