@@ -48,6 +48,9 @@ services:
         ipv4_address: 172.20.0.10
     ports:
       - "9000:9000"         # expose to host for Wireshark / external tools
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
 
   # ── Legitimate EVSE ─────────────────────────────────────────────────────────
   # Used in: normal baseline, SaiFlow (victim role)
@@ -188,6 +191,9 @@ services:
     ports:
       - "9000:9000"   # EVSE connects here (rogue CSMS)
       - "8080:8080"   # Payload visible on host for Wireshark / browser demo
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     profiles: [firmware]
 
   evse-via-firmware:

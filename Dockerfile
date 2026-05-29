@@ -9,6 +9,10 @@ ENV MPLBACKEND=Agg \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# tcpdump + procps (pkill) for per-attack pcap capture
+RUN apt-get update && apt-get install -y --no-install-recommends tcpdump procps \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY core/ ./core/
 COPY attacks/ ./attacks/
 
