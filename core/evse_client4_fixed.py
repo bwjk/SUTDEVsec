@@ -29,6 +29,14 @@ parser.add_argument(
     default="ws://127.0.0.1:9000",
     help="CSMS WebSocket URL (use ws://127.0.0.1:9001 when running MITM proxy)"
 )
+parser.add_argument(
+    "--session-duration",
+    type=int,
+    default=None,
+    metavar="SECONDS",
+    help="Run a timed charging session (StartTransaction → MeterValues → StopTransaction). "
+         "Required for the duration-spoof attack. Bypasses pandapower simulation."
+)
 args = parser.parse_args()
 TARGET_URL = args.url
 
@@ -212,6 +220,53 @@ async def run_sim(queue):
 
 
 # -----------------------------
+# TIMED CHARGING SESSION
+# Used by the duration-spoof attack: a clean StartTransaction → MeterValues
+# → StopTransaction flow so the proxy has a StopTransaction to intercept.
+# -----------------------------
+async def run_session(evse: "EVSE", duration_s: int):
+    interval_s = 5
+    print(f"[EVSE] Starting {duration_s}s charging session (StartTransaction)...")
+
+    resp = await evse.call(call.StartTransaction(
+        connector_id=1,
+        id_tag="EV-CARD-001",
+        meter_start=0,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    ))
+    tx_id = resp.transaction_id
+    print(f"[EVSE] StartTransaction ACK: transactionId={tx_id}")
+
+    meter_wh = 0
+    elapsed  = 0
+    while elapsed < duration_s:
+        await asyncio.sleep(interval_s)
+        elapsed  += interval_s
+        meter_wh += int(60.0 * interval_s / 3600 * 1000)   # 60 kW at 5s intervals
+        await evse.call(call.MeterValues(
+            connector_id=1,
+            transaction_id=tx_id,
+            meter_value=[{
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "sampledValue": [
+                    {"value": str(meter_wh), "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
+                    {"value": "60.0",        "measurand": "Power.Active.Import",            "unit": "kW"},
+                ],
+            }]
+        ))
+        print(f"[EVSE] MeterValues: {meter_wh} Wh  (t={elapsed}s)")
+
+    print(f"[EVSE] Session duration {duration_s}s elapsed — sending StopTransaction")
+    await evse.call(call.StopTransaction(
+        meter_stop=meter_wh,
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        transaction_id=tx_id,
+        reason="Local",
+    ))
+    print(f"[EVSE] StopTransaction ACK received — session ended cleanly")
+
+
+# -----------------------------
 # MAIN
 # -----------------------------
 async def main():
@@ -234,10 +289,13 @@ async def main():
 
         print("[CLIENT] connected to CSMS")
 
-        await asyncio.gather(
-            run_sim(queue),
-            ocpp_sender(queue, evse)
-        )
+        if args.session_duration is not None:
+            await run_session(evse, args.session_duration)
+        else:
+            await asyncio.gather(
+                run_sim(queue),
+                ocpp_sender(queue, evse)
+            )
 
         start_task.cancel()
         try:

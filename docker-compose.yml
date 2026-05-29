@@ -15,7 +15,8 @@
 #   docker compose --profile mitm     up   # Attack 3a — MITM proxy (INTERNAL, operator-net, ARP poisoning)
 #   docker compose --profile mitm-ext up   # Attack 3b — MITM proxy (EXTERNAL, public-net, BGP/DNS hijack)
 #   docker compose --profile load     up   # Attack 4 — coordinated load altering
-#   docker compose --profile firmware up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
+#   docker compose --profile firmware        up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
+#   docker compose --profile duration-spoof up   # Attack 6 — Duration Spoofing (StopTransaction drop)
 
 networks:
   operator-net:
@@ -207,3 +208,37 @@ services:
     depends_on:
       - atk-firmware
     profiles: [firmware]
+
+  # ── Attack 6 · Duration Spoofing ───────────────────────────────────────────
+  # Threat model: attacker on operator-net (ARP poisoning / rogue switch) —
+  #               drops the EVSE's StopTransaction so the CSMS never learns
+  #               the session ended; injects phantom MeterValues sustaining
+  #               60 kW ghost load in PGTwin for GHOST_DURATION_S seconds.
+  # This is the OPPOSITE of premature termination (Attack 3a).
+
+  atk-duration-spoof:
+    build: .
+    container_name: atk-duration-spoof
+    hostname: atk-duration-spoof
+    command: sh -c "sleep 2 && python attacks/attack_duration_spoof.py --csms-url ws://csms:9000 --proxy-port 9003 --ghost-duration 50 --meter-interval 10"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.41
+    depends_on:
+      - csms
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    profiles: [duration-spoof]
+
+  evse-via-duration-spoof:
+    build: .
+    container_name: evse-via-duration-spoof
+    hostname: evse-via-duration-spoof
+    command: sh -c "sleep 4 && python core/evse_client4_fixed.py --url ws://atk-duration-spoof:9003 --session-duration 20"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.61
+    depends_on:
+      - atk-duration-spoof
+    profiles: [duration-spoof]

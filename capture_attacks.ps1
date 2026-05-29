@@ -2,84 +2,22 @@
 # Run EVSecSim attack profiles and save a pcap for each one.
 #
 # Usage:
-#   .\capture_attacks.ps1              # run and capture all profiles
-#   .\capture_attacks.ps1 -Profile fdi # run and capture one profile
+#   .\capture_attacks.ps1                  # capture all profiles (~7 min)
+#   .\capture_attacks.ps1 -Profile fdi     # capture one profile
 #
-# Output: captures/attack_<label>.pcap  — open in Wireshark
-# OCPP dissection in Wireshark: Analyze > Decode As > WebSocket Port 9000 -> OCPP
+# Output: captures\attack_<label>.pcap  -- open in Wireshark
+# OCPP dissection: right-click port-9000 stream -> Decode As -> WebSocket
 
 param(
-    [ValidateSet("all","normal","saiflow","fdi","mitm","mitm-ext","load","firmware")]
     [string]$Profile = "all"
 )
 
 $CaptureDir = "captures"
 New-Item -ItemType Directory -Force -Path $CaptureDir | Out-Null
 
-# Each entry: which profile to run, which container to capture in (the traffic hub),
-# the tcpdump BPF filter, how long to capture (seconds), and the output filename label.
-$Attacks = @(
-    [ordered]@{
-        Profile   = "normal"
-        Container = "csms"
-        Filter    = "port 9000"
-        Duration  = 30
-        Label     = "normal_baseline"
-    },
-    [ordered]@{
-        Profile   = "saiflow"
-        Container = "csms"
-        Filter    = "port 9000"
-        Duration  = 75
-        Label     = "saiflow_dos"
-    },
-    [ordered]@{
-        Profile   = "fdi"
-        Container = "csms"
-        Filter    = "port 9000"
-        Duration  = 60
-        Label     = "fdi"
-    },
-    [ordered]@{
-        Profile   = "mitm"
-        Container = "csms"
-        Filter    = "port 9000 or port 9001"
-        Duration  = 45
-        Label     = "mitm_internal"
-    },
-    [ordered]@{
-        Profile   = "mitm-ext"
-        Container = "csms"
-        Filter    = "port 9000 or port 9002"
-        Duration  = 45
-        Label     = "mitm_external"
-    },
-    [ordered]@{
-        Profile   = "load"
-        Container = "csms"
-        Filter    = "port 9000"
-        Duration  = 60
-        Label     = "load_altering"
-    },
-    [ordered]@{
-        Profile   = "firmware"
-        Container = "atk-firmware"
-        Filter    = "port 9000 or port 8080"
-        Duration  = 45
-        Label     = "firmware_update"
-    }
-)
-
-function Invoke-Capture {
-    param([hashtable]$Attack)
-
-    $prof      = $Attack.Profile
-    $container = $Attack.Container
-    $filter    = $Attack.Filter
-    $duration  = $Attack.Duration
-    $label     = $Attack.Label
-    $pcapOut   = "$CaptureDir/attack_${label}.pcap"
-    $tmpPcap   = "/tmp/capture_${label}.pcap"
+function Invoke-Capture($prof, $container, $filter, $duration, $label) {
+    $pcapOut = "$CaptureDir\attack_${label}.pcap"
+    $tmpPcap = "/tmp/capture_${label}.pcap"
 
     Write-Host ""
     Write-Host "========================================================"
@@ -90,23 +28,23 @@ function Invoke-Capture {
     Write-Host "  Output    : $pcapOut"
     Write-Host "========================================================"
 
-    # Clean up any leftover containers from a previous run
-    docker compose --profile $prof down 2>$null
+    # Clean up leftovers from any previous run (--remove-orphans clears renamed services)
+    docker compose --profile $prof down --remove-orphans 2>$null
 
     Write-Host "[$prof] Building and starting containers..."
     docker compose --profile $prof up -d --build
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[$prof] ERROR: docker compose up failed — skipping"
+        Write-Host "[$prof] ERROR: docker compose up failed -- skipping"
         return
     }
 
     Write-Host "[$prof] Waiting 8s for containers to initialise..."
     Start-Sleep 8
 
-    Write-Host "[$prof] Starting tcpdump in '$container'..."
+    Write-Host "[$prof] Starting tcpdump inside '$container'..."
     docker exec -d $container sh -c "tcpdump -i any -w $tmpPcap '$filter' 2>/tmp/tcpdump_${label}.log"
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "[$prof] ERROR: could not start tcpdump — is NET_ADMIN set and tcpdump installed?"
+        Write-Host "[$prof] ERROR: tcpdump failed -- is NET_ADMIN set? Rebuild with --build."
         docker compose --profile $prof down
         return
     }
@@ -116,7 +54,7 @@ function Invoke-Capture {
 
     Write-Host "[$prof] Stopping tcpdump (SIGINT flushes the file)..."
     docker exec $container pkill -SIGINT tcpdump
-    Start-Sleep 3   # let tcpdump finish writing
+    Start-Sleep 3
 
     Write-Host "[$prof] Copying pcap out of container..."
     docker cp "${container}:${tmpPcap}" $pcapOut
@@ -125,41 +63,54 @@ function Invoke-Capture {
         $bytes = (Get-Item $pcapOut).Length
         Write-Host "[$prof] Saved: $pcapOut  ($bytes bytes)"
     } else {
-        Write-Host "[$prof] WARNING: pcap not found — check /tmp/tcpdump_${label}.log inside container"
+        Write-Host "[$prof] WARNING: pcap missing -- check tcpdump log inside container"
     }
 
     Write-Host "[$prof] Tearing down..."
-    docker compose --profile $prof down
-    Start-Sleep 2
+    docker compose --profile $prof down --remove-orphans
+    Start-Sleep 5
 }
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-if ($Profile -eq "all") {
-    Write-Host "Capturing all attack profiles in sequence."
-    Write-Host "Total estimated time: ~7 minutes"
-    foreach ($attack in $Attacks) {
-        Invoke-Capture $attack
+# Profile -> container, filter, duration(s), output label
+switch ($Profile) {
+    "normal"   { Invoke-Capture "normal"   "csms"         "port 9000"                  30 "normal_baseline" }
+    "saiflow"  { Invoke-Capture "saiflow"  "csms"         "port 9000"                  75 "saiflow_dos" }
+    "fdi"      { Invoke-Capture "fdi"      "csms"         "port 9000"                  60 "fdi" }
+    "mitm"     { Invoke-Capture "mitm"     "csms"         "port 9000 or port 9001"     45 "mitm_internal" }
+    "mitm-ext" { Invoke-Capture "mitm-ext" "csms"         "port 9000 or port 9002"     45 "mitm_external" }
+    "load"     { Invoke-Capture "load"     "csms"         "port 9000"                  60 "load_altering" }
+    "firmware"       { Invoke-Capture "firmware"       "atk-firmware"       "port 9000 or port 8080"     45 "firmware_update" }
+    "duration-spoof" { Invoke-Capture "duration-spoof" "atk-duration-spoof" "port 9000 or port 9003"     80 "duration_spoof" }
+    "all" {
+        Write-Host "Capturing all attack profiles in sequence (~9 min total)..."
+        Invoke-Capture "normal"         "csms"               "port 9000"                  30 "normal_baseline"
+        Invoke-Capture "saiflow"        "csms"               "port 9000"                  75 "saiflow_dos"
+        Invoke-Capture "fdi"            "csms"               "port 9000"                  60 "fdi"
+        Invoke-Capture "mitm"           "csms"               "port 9000 or port 9001"     45 "mitm_internal"
+        Invoke-Capture "mitm-ext"       "csms"               "port 9000 or port 9002"     45 "mitm_external"
+        Invoke-Capture "load"           "csms"               "port 9000"                  60 "load_altering"
+        Invoke-Capture "firmware"       "atk-firmware"       "port 9000 or port 8080"     45 "firmware_update"
+        Invoke-Capture "duration-spoof" "atk-duration-spoof" "port 9000 or port 9003"     80 "duration_spoof"
     }
-} else {
-    $attack = $Attacks | Where-Object { $_.Profile -eq $Profile }
-    if ($null -eq $attack) {
+    default {
         Write-Host "Unknown profile: $Profile"
+        Write-Host "Valid values: all, normal, saiflow, fdi, mitm, mitm-ext, load, firmware, duration-spoof"
         exit 1
     }
-    Invoke-Capture $attack
 }
 
 Write-Host ""
 Write-Host "========================================================"
-Write-Host "  Done. Pcap files in ./$CaptureDir/"
-Get-ChildItem $CaptureDir -Filter "*.pcap" | ForEach-Object {
-    Write-Host "  $($_.Name)  ($($_.Length) bytes)"
+Write-Host "  Done. Pcap files saved to .\$CaptureDir\"
+$files = Get-ChildItem $CaptureDir -Filter "*.pcap" -ErrorAction SilentlyContinue
+if ($files) {
+    foreach ($f in $files) {
+        Write-Host "  $($f.Name)  ($($f.Length) bytes)"
+    }
 }
 Write-Host ""
 Write-Host "  Wireshark tips:"
-Write-Host "  - Decode As: right-click a TCP stream on port 9000/9001/9002"
-Write-Host "    -> Decode As -> WebSocket"
-Write-Host "  - OCPP frames appear as JSON inside WebSocket payloads"
-Write-Host "  - Filter: websocket  (shows only WS frames)"
+Write-Host "  - Right-click any TCP stream on port 9000 -> Decode As -> WebSocket"
+Write-Host "  - Filter: websocket  (OCPP JSON visible in packet details)"
+Write-Host "  - For firmware: also filter  http  (port 8080 payload delivery)"
 Write-Host "========================================================"

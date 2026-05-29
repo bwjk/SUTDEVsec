@@ -13,6 +13,8 @@ from ocpp.v16 import ChargePoint as cp
 from ocpp.v16.enums import RegistrationStatus, FirmwareStatus
 from ocpp.v16 import call_result
 
+_tx_counter = 0
+
 
 # -----------------------------
 # CSMS (Central System)
@@ -33,6 +35,17 @@ class CSMS(cp):
     async def on_heartbeat(self):
         return call_result.Heartbeat(
             current_time=datetime.now(timezone.utc).isoformat()
+        )
+
+    @on('StartTransaction')
+    async def on_start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
+        global _tx_counter
+        _tx_counter += 1
+        print(f"[CSMS] {self.id} | StartTransaction: connectorId={connector_id} "
+              f"idTag={id_tag} meterStart={meter_start} Wh → txId={_tx_counter}")
+        return call_result.StartTransaction(
+            transaction_id=_tx_counter,
+            id_tag_info={"status": "Accepted"},
         )
 
     @on('MeterValues')
