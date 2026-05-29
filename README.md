@@ -12,7 +12,7 @@ EVSecSim simulates a minimal EV charging ecosystem consisting of:
 
 - A **CSMS** (Central System / Charge Point Management System) over WebSocket
 - An **EVSE client** (EV Supply Equipment) backed by a live pandapower grid twin
-- Six **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models
+- Seven **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models
 
 The attacks target weaknesses documented by SaiFlow (2023) and Idaho National Laboratory (INL/CON-23-72329, 2023): no transport encryption, no message authentication, no connection deduplication, no charge-point identity verification, and no firmware signature verification.
 
@@ -24,6 +24,7 @@ The attacks target weaknesses documented by SaiFlow (2023) and Idaho National La
 SUTDEVsec/
 ├── Dockerfile                      # Shared image for all services
 ├── docker-compose.yml              # Full containerised topology
+├── capture_attacks.ps1             # Automated pcap capture for all profiles
 ├── .dockerignore
 ├── requirements.txt
 ├── core/
@@ -37,6 +38,7 @@ SUTDEVsec/
     ├── attack_mitm_ext.py              # Attack 3b: MITM proxy — external (public-net)
     ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
     ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
+    ├── attack_duration_spoof.py        # Attack 6:  Duration spoofing (StopTransaction drop)
     └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
 ```
 
@@ -69,23 +71,30 @@ Each component runs in its own container on a logically separate network segment
   │                                   │                                             │
   │                       ┌───────────┴──────────┐                                 │
   │                       │    csms  172.19.0.10  │                                 │
-  │                       └──┬──────────┬─────────┘                                │
-  │                          │          │          │                                │
-  │         ┌────────────────┘          │          └────────────────┐               │
-  │         ▼                           ▼                           ▼               │
-  │  ┌─────────────┐   ┌───────────────────┐   ┌──────────────────┐   ┌───────────────────┐  │
-  │  │    evse      │   │   evse-via-fdi     │   │    atk-mitm      │   │   atk-firmware    │  │
-  │  │ 172.19.0.20  │   │   172.19.0.30      │   │  172.19.0.40     │   │   172.19.0.30     │  │
-  │  │ (legit EVSE) │   │ (compromised EVSE) │   │  proxy :9001     │   │ rogue CSMS :9000  │  │
-  │  └─────────────┘   └───────────────────┘   └────────┬─────────┘   │ payload HTTP :8080 │  │
-  │                                                       │             └────────┬──────────┘  │
-  │                                           ws://atk-mitm:9001                │              │
-  │                                                       ▼                      ▼              │
-  │                                          ┌──────────────────┐   ┌──────────────────────┐   │
-  │                                          │   evse-via-mitm  │   │  evse-via-firmware   │   │
-  │                                          │   172.19.0.50    │   │  172.19.0.60         │   │
-  │                                          └──────────────────┘   └──────────────────────┘   │
-  └────────────────────────────────────────────────────────────────────────────────────────────┘
+  │                       └──┬────┬────┬──────────┘                                │
+  │                          │    │    │    │                                       │
+  │         ┌────────────────┘    │    │    └──────────────┐                       │
+  │         ▼                     ▼    ▼                   ▼                       │
+  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
+  │  │    evse      │  │ evse-via-fdi │  │   atk-mitm   │  │   atk-firmware   │   │
+  │  │ 172.19.0.20  │  │ 172.19.0.30  │  │ 172.19.0.40  │  │  172.19.0.30    │   │
+  │  │ (legit EVSE) │  │(compromised) │  │ proxy :9001  │  │ rogue CSMS :9000 │   │
+  │  └─────────────┘  └──────────────┘  └──────┬───────┘  │ payload HTTP:8080│   │
+  │                                              │          └────────┬─────────┘   │
+  │                                ws://atk-mitm:9001               │             │
+  │                                              ▼                   ▼             │
+  │                                 ┌──────────────────┐  ┌──────────────────┐    │
+  │                                 │  evse-via-mitm   │  │ evse-via-firmware│    │
+  │                                 │  172.19.0.50     │  │  172.19.0.60     │    │
+  │                                 └──────────────────┘  └──────────────────┘    │
+  │                                                                                │
+  │  ┌──────────────────────────┐                                                  │
+  │  │  atk-duration-spoof      │  proxy :9003  ←── evse-via-duration-spoof       │
+  │  │  172.19.0.41  (Attack 6) │  drops StopTransaction, injects phantom load    │
+  │  │  evse-via-duration-spoof │                                                  │
+  │  │  172.19.0.61             │                                                  │
+  │  └──────────────────────────┘                                                  │
+  └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Threat model per attack
@@ -98,6 +107,7 @@ Each component runs in its own container on a logically separate network segment
 | 3b | MITM — External | External attacker | public-net | No | BGP hijack / DNS poisoning / rogue cloud proxy |
 | 4 | Load Altering | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
 | 5 | Malicious Firmware Update | Rogue / compromised CSMS | operator-net | Yes | DNS poisoning / compromised CSMS platform |
+| 6 | Duration Spoofing | MITM on operator LAN | operator-net | Yes | ARP poisoning / rogue switch |
 
 ---
 
@@ -130,6 +140,9 @@ docker compose --profile load up --build
 
 # Attack 5 — Malicious firmware update  (rogue CSMS, no real CSMS started)
 docker compose --profile firmware up --build
+
+# Attack 6 — Duration spoofing  (StopTransaction drop, phantom load)
+docker compose --profile duration-spoof up --build
 ```
 
 Drop `--build` on repeat runs if no code has changed.
@@ -147,42 +160,50 @@ docker logs -f atk-mitm
 docker logs -f atk-mitm-ext
 docker logs -f atk-firmware
 docker logs -f evse-via-firmware
+docker logs -f atk-duration-spoof
+docker logs -f evse-via-duration-spoof
 ```
 
 ### Tear down
 
 ```bash
-docker compose --profile <profile> down
+docker compose --profile <profile> down --remove-orphans
 ```
 
-### Capture traffic (Wireshark / tcpdump)
+### Automated pcap capture
 
-Port 9000 is published to the host. Capture locally:
+`capture_attacks.ps1` automates the full capture workflow for each profile: builds containers, waits for initialisation, runs `tcpdump` inside the capture container for the configured window, extracts the pcap, and tears down.
 
-```bash
-# Host-side (Linux/macOS)
-tcpdump -i any -w capture.pcap port 9000
+```powershell
+# Capture all profiles in sequence (~9 min total)
+.\capture_attacks.ps1
 
-# Inside a container
-docker exec -it csms tcpdump -i eth0 -w /tmp/capture.pcap
+# Capture one profile
+.\capture_attacks.ps1 -Profile saiflow
+.\capture_attacks.ps1 -Profile duration-spoof
 ```
 
-Wireshark filters by attack:
+Output files are written to `captures\attack_<label>.pcap`. Open in Wireshark and right-click any TCP stream on port 9000 → **Decode As → WebSocket** to view OCPP JSON payloads.
 
-| Attack | Filter |
-|--------|--------|
-| FDI | `websocket && ip.dst == 172.19.0.10` |
-| MITM internal | `websocket && (tcp.port == 9000 or tcp.port == 9001)` |
-| MITM external | `websocket && (tcp.port == 9000 or tcp.port == 9002)` |
-| SaiFlow / Load | `websocket && ip.dst == 172.20.0.10` |
-| Firmware | `websocket && ip.dst == 172.19.0.30` |
+### Wireshark filters by attack
 
-For Attack 5 also capture the HTTP payload delivery (port 8080 is published to host):
+| Attack | Capture container | Filter |
+|--------|------------------|--------|
+| Normal baseline | `csms` | `websocket` |
+| FDI | `csms` | `websocket && ip.dst == 172.19.0.10` |
+| MITM internal | `csms` | `websocket && (tcp.port == 9000 or tcp.port == 9001)` |
+| MITM external | `csms` | `websocket && (tcp.port == 9000 or tcp.port == 9002)` |
+| SaiFlow / Load | `csms` | `websocket && ip.dst == 172.20.0.10` |
+| Firmware | `atk-firmware` | `websocket \|\| http` |
+| Duration spoofing | `atk-duration-spoof` | `websocket && (tcp.port == 9000 or tcp.port == 9003)` |
+
+For Attack 5 also inspect the HTTP payload delivery (port 8080 is published to host):
 
 ```bash
-# See the malicious firmware file served to the EVSE
 curl http://localhost:8080/firmware.sh
 ```
+
+For Attack 6 the key evidence spans two ports: StopTransaction on port 9003 (EVSE→proxy, **absent on port 9000**), then phantom MeterValues on port 9000 only after port 9003 goes silent.
 
 ---
 
@@ -209,8 +230,11 @@ pip install -r requirements.txt
 # Terminal 1 — CSMS
 python core/csms_server4.py
 
-# Terminal 2 — Legitimate EVSE
+# Terminal 2 — Legitimate EVSE (300s pandapower simulation)
 python core/evse_client4_fixed.py
+
+# Terminal 2 — Timed charging session (for duration-spoof testing)
+python core/evse_client4_fixed.py --session-duration 20
 
 # Terminal 2 — EVSE via internal MITM proxy (port 9001)
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9001
@@ -218,12 +242,19 @@ python core/evse_client4_fixed.py --url ws://127.0.0.1:9001
 # Terminal 2 — EVSE via external MITM proxy (port 9002)
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9002
 
+# Terminal 2 — EVSE via duration-spoof proxy (port 9003)
+python core/evse_client4_fixed.py --url ws://127.0.0.1:9003 --session-duration 20
+
 # Attack 5 — rogue CSMS replaces the real one; EVSE connects to it
 # Terminal 1 (rogue CSMS + HTTP payload server):
 python attacks/attack_firmware.py
-
 # Terminal 2 (EVSE — points at rogue CSMS, NOT the real one):
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9000
+
+# Attack 6 — duration spoof proxy (run alongside real CSMS)
+# Terminal 1: python core/csms_server4.py
+# Terminal 2: python attacks/attack_duration_spoof.py
+# Terminal 3: python core/evse_client4_fixed.py --url ws://127.0.0.1:9003 --session-duration 20
 ```
 
 ---
@@ -383,6 +414,46 @@ python attacks/attack_firmware.py --firmware-host atk-firmware --push-delay 10
 
 **Root cause:** `UpdateFirmware` in OCPP 1.6 has no signature field; EVSE has no way to verify CSMS identity (no mutual TLS).  
 **Mitigation:** OCPP 2.0.1 `SignedUpdateFirmware` with X.509 certificate chain; mutual TLS on CSMS WebSocket; EVSE-side firmware hash and signature verification before installation.
+
+---
+
+### Attack 6 — Duration Spoofing (StopTransaction Suppression)
+
+**Script:** `attacks/attack_duration_spoof.py`  
+**Profile:** `duration-spoof`  
+**Network:** operator-net (172.19.0.41)  
+**Initial access:** ARP poisoning / rogue switch on charging site LAN
+
+OCPP 1.6 gives the CSMS no independent mechanism to detect when an EV physically disconnects — it relies entirely on the EVSE sending `StopTransaction`. A MITM proxy can intercept and suppress this message, sustaining a phantom charging session on the CSMS after the real EV has left.
+
+This is the **opposite** of premature session termination (Attack 3a). Rather than forging an early stop, it prevents the legitimate stop from being acknowledged by the real CSMS, keeping the session open indefinitely.
+
+| Phase | Duration | Action |
+|-------|----------|--------|
+| 1 — Transparent relay | 0 s → real disconnect | `BootNotification`, `StartTransaction`, and `MeterValues` forwarded normally. Proxy captures `transactionId` from the `StartTransaction` ACK. |
+| 2 — StopTransaction DROP | At real disconnect | EVSE sends `StopTransaction`. Proxy intercepts it, sends a **forged ACK** back to the EVSE so it disconnects cleanly. The message is **not forwarded** to the CSMS — the CSMS never learns the session ended. |
+| 3 — Ghost session | 50 s (configurable) | Proxy injects synthetic `MeterValues` at 60 kW every 10 s, sustaining the phantom session. After the ghost window, a final `StopTransaction` is sent to clean up CSMS state. |
+
+**PGTwin impact:** The CSMS reports an active 60 kW load on a physically idle charger. If the CSMS feeds load data to the PGTwin grid twin at each `MeterValues` interval, the simulation accumulates non-existent grid demand. With the default 50 s ghost window, **0.83 kWh of phantom energy** is injected per spoofed session. The error grows linearly with ghost duration and number of targeted chargers.
+
+**Evidence in the pcap (capture container: `atk-duration-spoof`, filter: `port 9003 or port 9000`):**
+- `StopTransaction` appears on port 9003 (EVSE→proxy) — **absent on port 9000** (proxy→CSMS)
+- Forged ACK appears on port 9003 (proxy→EVSE) at the same instant
+- Phantom `MeterValues` appear on port 9000 only, after port 9003 goes silent
+
+```bash
+# Run the proxy (Terminal 1 after starting CSMS)
+python attacks/attack_duration_spoof.py --csms-url ws://127.0.0.1:9000
+
+# Run EVSE with a timed session so it sends StopTransaction (Terminal 2)
+python core/evse_client4_fixed.py --url ws://127.0.0.1:9003 --session-duration 20
+
+# Longer ghost phase for PGTwin integration demo
+python attacks/attack_duration_spoof.py --ghost-duration 120 --meter-interval 5
+```
+
+**Root cause:** `StopTransaction` is unsigned and unverified; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
+**Mitigation:** WSS + mutual TLS (prevents MITM interposition); CSMS Heartbeat inactivity timeout (Heartbeat stops when EVSE disconnects, eventually triggering a timeout); OCPP 2.0.1 signed `StopTransaction`; physical pilot-signal monitoring (CSMS cross-checks CP state against EVSE presence signal).
 
 ---
 
