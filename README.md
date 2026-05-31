@@ -44,6 +44,78 @@ SUTDEVsec/
 
 ---
 
+## Core Components
+
+### CSMS — `core/csms_server4.py`
+
+A minimal OCPP 1.6 Central System Management Server that intentionally omits all security controls present in production deployments. It exists to be a realistic target: it behaves like a real CSMS but leaves every documented OCPP 1.6 vulnerability exposed.
+
+**What it does:**
+- Listens for WebSocket connections on `ws://0.0.0.0:9000`
+- Reads the first raw text frame as the Charge Point identity (no credential check)
+- Spawns an independent asyncio task per connection — there is **no CP registry**, so duplicate CP IDs create two live sessions simultaneously (the SaiFlow vulnerability)
+- Accepts every `BootNotification` unconditionally (`RegistrationStatus.accepted`)
+- Issues auto-incrementing `transactionId` values starting at 1 (shared global counter across all CPs)
+- Logs `MeterValues` power readings to stdout — no plausibility check, no signature verification
+- Logs `StopTransaction` with billing summary — no integrity check on the reported `meterStop`
+- Handles `FirmwareStatusNotification` — logs progress, no verification of the firmware source
+
+**Default settings:**
+
+| Parameter | Value | Set via |
+|-----------|-------|---------|
+| Bind address | `0.0.0.0` | `BIND_HOST` env var |
+| Port | `9000` | hardcoded |
+| Heartbeat interval returned to EVSE | `10 s` | hardcoded |
+| Registration policy | accept all | hardcoded |
+| Duplicate CP handling | both sessions kept alive | no dedup logic |
+| Message authentication | none | OCPP 1.6 has none |
+
+**OCPP messages handled:** `BootNotification`, `Heartbeat`, `StartTransaction`, `MeterValues`, `StopTransaction`, `FirmwareStatusNotification`
+
+---
+
+### EVSE — `core/evse_client4_fixed.py`
+
+A legitimate EV charging station simulator backed by a live pandapower grid twin. It models realistic load behaviour across 5 EV connectors and is the "victim" that attack scripts target or impersonate.
+
+**What it does:**
+
+*Default mode (pandapower simulation):*
+- Connects to the CSMS as CP `CP_1`
+- Sends `BootNotification` (vendor: `Vendor`, model: `Model1`)
+- Builds a local pandapower grid twin: 6.6 kV → 0.4 kV, 1 MVA transformer, 5 load buses at 60 kW rated each
+- Every second, each load is randomly toggled on or off (50 % probability)
+- Every 5 seconds, runs a DC power flow (`pp.runpp`) and reports each active load's real power as a `MeterValues` frame (measurand: `Power.Active.Import`, unit: `kW`)
+- Suppresses readings below 0.5 kW to reduce noise
+- Simulation runs for **300 seconds** then the process exits
+
+*Timed session mode (`--session-duration N`):*
+- Skips pandapower — sends a single `StartTransaction` (id\_tag: `EV-CARD-001`, `meterStart=0`)
+- Sends `MeterValues` every **5 seconds** at a fixed **60 kW** with a cumulative energy register (Wh)
+- After N seconds, sends `StopTransaction` with the final energy reading and exits cleanly
+- Used by the duration-spoof attack so the proxy has a real `StopTransaction` to intercept
+
+**Default settings:**
+
+| Parameter | Value | Set via |
+|-----------|-------|---------|
+| CP identity | `CP_1` | hardcoded |
+| CSMS URL | `ws://127.0.0.1:9000` | `--url` |
+| Simulation duration | `300 s` | hardcoded |
+| Power flow interval | every `5 s` | hardcoded |
+| Load per connector (rated) | `60 kW` | pandapower model |
+| Connectors | `5` | pandapower model |
+| MeterValues measurand | `Power.Active.Import` | hardcoded |
+| Timed session power | `60 kW` (fixed) | hardcoded |
+| Timed session MeterValues interval | `5 s` | hardcoded |
+| Timed session id\_tag | `EV-CARD-001` | hardcoded |
+| Session duration (timed mode) | no default — required | `--session-duration` |
+
+**OCPP messages sent:** `BootNotification`, `MeterValues`, `StartTransaction` (timed mode), `StopTransaction` (timed mode), `FirmwareStatusNotification` (when firmware update received)
+
+---
+
 ## Containerised Network Topology
 
 Each component runs in its own container on a logically separate network segment. The CSMS is dual-homed. External attackers on `public-net` can only reach `172.20.0.10:9000` and have zero visibility into `operator-net`.

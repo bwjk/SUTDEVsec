@@ -110,6 +110,7 @@ RESET  = "\033[0m"
 def ts():
     return datetime.now().strftime("%H:%M:%S")
 
+_attack_complete = asyncio.Event()
 
 # ============================================================
 # Malicious firmware payload (shell script)
@@ -260,6 +261,7 @@ class RogueCsms(cp):
             print(f"[{ts()}] {RED}{BOLD}{'!'*60}{RESET}")
             print()
             self._print_summary()
+            asyncio.get_event_loop().call_later(2, _attack_complete.set)
 
         return call_result.FirmwareStatusNotification()
 
@@ -395,7 +397,14 @@ async def main():
         except NotImplementedError:
             pass  # Windows
 
-    await stop
+    # Exit when the attack completes or on SIGINT/SIGTERM
+    attack_task = asyncio.create_task(_attack_complete.wait())
+    done, pending = await asyncio.wait(
+        [stop, attack_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
     server.close()
     await server.wait_closed()
 

