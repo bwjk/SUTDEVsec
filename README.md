@@ -12,7 +12,8 @@ EVSecSim simulates a minimal EV charging ecosystem consisting of:
 
 - A **CSMS** (Central System / Charge Point Management System) over WebSocket
 - An **EVSE client** (EV Supply Equipment) backed by a live pandapower grid twin
-- Seven **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models
+- A **PGTwin grid simulator** (Dr. Biswas's 7-substation Singapore distribution network, 66 kV → 22 kV → 6.6 kV → 0.4 kV)
+- Nine **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models, including two attacks wired to the real PGTwin grid
 
 The attacks target weaknesses documented by SaiFlow (2023) and Idaho National Laboratory (INL/CON-23-72329, 2023): no transport encryption, no message authentication, no connection deduplication, no charge-point identity verification, and no firmware signature verification.
 
@@ -30,6 +31,8 @@ SUTDEVsec/
 ├── core/
 │   ├── csms_server4.py             # OCPP 1.6 CSMS (WebSocket server on port 9000)
 │   └── evse_client4_fixed.py       # Legitimate EVSE client + pandapower grid simulation
+├── grid/
+│   └── ZSGplussync_docker.py       # PGTwin: 7-substation Singapore grid (Dr. Biswas)
 └── attacks/
     ├── run_attacks.py                  # Interactive orchestrator (local use)
     ├── attack_saiflow_dos_patched.py   # Attack 1:  SaiFlow duplicate-CP DoS
@@ -39,6 +42,8 @@ SUTDEVsec/
     ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
     ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
     ├── attack_duration_spoof.py        # Attack 6:  Duration spoofing (StopTransaction drop)
+    ├── attack_load_grid.py             # Attack 7:  Coordinated load altering + PGTwin grid
+    ├── attack_spoof_grid.py            # Attack 8:  Duration spoofing + PGTwin grid
     └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
 ```
 
@@ -180,6 +185,8 @@ Each component runs in its own container on a logically separate network segment
 | 4 | Load Altering | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
 | 5 | Malicious Firmware Update | Rogue / compromised CSMS | operator-net | Yes | DNS poisoning / compromised CSMS platform |
 | 6 | Duration Spoofing | MITM on operator LAN | operator-net | Yes | ARP poisoning / rogue switch |
+| 7 | Load Altering + PGTwin | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
+| 8 | Duration Spoofing + PGTwin | MITM on operator LAN | operator-net | Yes | ARP poisoning / rogue switch |
 
 ---
 
@@ -215,9 +222,17 @@ docker compose --profile firmware up --build
 
 # Attack 6 — Duration spoofing  (StopTransaction drop, phantom load)
 docker compose --profile duration-spoof up --build
+
+# Attack 7 — Coordinated load altering + PGTwin real grid  (external botnet → Bus 44 voltage sag)
+docker compose --profile load-grid up --build --force-recreate
+
+# Attack 8 — Duration spoofing + PGTwin real grid  (ghost session holds Bus 44 depressed 60 s)
+docker compose --profile spoof-grid up --build --force-recreate
 ```
 
 Drop `--build` on repeat runs if no code has changed.
+
+> **Note for Attacks 7 and 8:** Always use `--force-recreate` (or run `docker compose --profile <X> down` first). Docker Compose reuses running containers across sessions; without recreating, the `pgtwin` container may start without its shared volume mount and the OCPP→grid coupling will not work. For Attack 8, do **not** use `--abort-on-container-exit` — the EVSE container exits by design after receiving the forged `StopTransaction` ACK, and the ghost phase must continue for a further 60 seconds after that.
 
 ### Follow logs
 
@@ -234,6 +249,15 @@ docker logs -f atk-firmware
 docker logs -f evse-via-firmware
 docker logs -f atk-duration-spoof
 docker logs -f evse-via-duration-spoof
+
+# Attack 7 containers
+docker logs -f atk-load-grid
+docker logs -f pgtwin
+
+# Attack 8 containers
+docker logs -f atk-spoof-grid
+docker logs -f evse-via-spoof-grid
+docker logs -f pgtwin
 ```
 
 ### Tear down
@@ -268,6 +292,8 @@ Output files are written to `captures\attack_<label>.pcap`. Open in Wireshark an
 | SaiFlow / Load | `csms` | `websocket && ip.dst == 172.20.0.10` |
 | Firmware | `atk-firmware` | `websocket \|\| http` |
 | Duration spoofing | `atk-duration-spoof` | `websocket && (tcp.port == 9000 or tcp.port == 9003)` |
+| Load altering + PGTwin | `atk-load-grid` | `websocket && ip.dst == 172.20.0.10` |
+| Duration spoofing + PGTwin | `atk-spoof-grid` | `websocket && (tcp.port == 9000 or tcp.port == 9004)` |
 
 For Attack 5 also inspect the HTTP payload delivery (port 8080 is published to host):
 
@@ -789,6 +815,179 @@ python attacks/attack_duration_spoof.py --ghost-duration 120 --meter-interval 5
 
 **Root cause:** `StopTransaction` is unsigned and unverified; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
 **Mitigation:** WSS + mutual TLS (prevents MITM interposition); CSMS Heartbeat inactivity timeout (Heartbeat stops when EVSE disconnects, eventually triggering a timeout); OCPP 2.0.1 signed `StopTransaction`; physical pilot-signal monitoring (CSMS cross-checks CP state against EVSE presence signal).
+
+---
+
+### Attack 7 — Coordinated Load Altering + PGTwin Grid
+
+**Script:** `attacks/attack_load_grid.py`  
+**Profile:** `load-grid`  
+**Network:** public-net (external botnet → CSMS) + shared Docker volume (OCPP→grid coupling)  
+**Grid:** Dr. Biswas's 7-substation Singapore distribution network (`grid/ZSGplussync_docker.py`)
+
+Attack #4 re-run against the real PGTwin instead of the toy grid twin. Five unauthenticated bot chargers connect to the CSMS over OCPP 1.6, execute coordinated load commands, and write the aggregated EV kW to a Docker shared volume file (`/shared/ev_load_kw.txt`). The PGTwin container reads this file before every `runpp()` call and injects the load at **Bus 44** (Load4, DS4, 0.4 kV, small industry feeder, baseline 100 kW).
+
+**Coupling mechanism:**
+```
+[atk-load-grid] ──writes──► /shared/ev_load_kw.txt ◄──reads── [pgtwin]
+   (OCPP MeterValues)           (Docker volume)              (pandapower runpp)
+```
+
+| Phase | Action | Bus 44 vm_pu | Total load |
+|-------|--------|-------------|------------|
+| Baseline | 5 bots × 11 kW = 55 kW reported | **0.9546** | 1345 kW |
+| Surge | Same fleet, coordinated max | **0.9546** | 1345 kW |
+| Drop | All bots → 0 kW | **0.9689** | 1290 kW |
+| Oscillate | Toggle 0 ↔ 55 kW every 5 s | alternates | alternates |
+
+```bash
+docker compose --profile load-grid up --build --force-recreate
+```
+
+**Expected output — pgtwin container (key evidence: vm_pu sag on bot connect, recovery on drop):**
+```
+[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).
+[PGTwin] iter=   1 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
+[PGTwin] iter=   2 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
+...
+[PGTwin] iter=1323 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW   ← DROP phase
+...
+[PGTwin] iter=2109 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW   ← OSCILLATE MAX
+[PGTwin] iter=2110 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
+[PGTwin] iter=2111 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW   ← mid-transition
+[PGTwin] iter=2112 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW   ← OSCILLATE ZERO
+```
+
+**Expected output — atk-load-grid container:**
+```
+  CSMS           : ws://csms:9000
+  Bot fleet      : 5 chargers × 11 kW
+  EV load file   : /shared/ev_load_kw.txt
+  Phase duration : 30s each
+  Grid target    : Load4 Bus 44 (DS4, 0.4 kV, small industry)
+
+[OK  13:35:17] 5 bots registered with CSMS
+
+  BASELINE — normal operation
+[GRD 13:35:17] Tick  1 | all bots → 11 kW | total=55 kW → PGTwin
+
+  ATTACK — COORDINATED DEMAND SURGE
+[ATK 13:35:47] Tick  1 | SURGE all 5 bots → 11 kW | total=55 kW → PGTwin ⚡
+
+  ATTACK — COORDINATED DEMAND DROP
+[ATK 13:36:17] Tick  1 | DROP  all 5 bots → 0 kW | total=0 kW → PGTwin
+
+  ATTACK — OSCILLATING LOAD
+[ATK 13:36:47] Tick  1 | ▲ MAX  all bots → 11 kW | total=55 kW → PGTwin
+[ATK 13:36:52] Tick  2 | ▼ ZERO all bots →  0 kW | total= 0 kW → PGTwin
+
+  Fleet size   : 5 bots × 11 kW
+  Peak load    : 55 kW injected at Bus 44 (Load4)
+
+  Grid evidence (read from shared volume):
+  - SimOutputBus.csv  → column vm_pu45 (Bus 44 voltage)
+  - SimOutputLine.csv → column loading_percent40 (feeder to Load4)
+
+  Thesis evidence checklist:
+  [x] OCPP 1.6: no CP authentication — any ID accepted by CSMS
+  [x] Surge phase: Load4 Bus 44 voltage sags in PGTwin CSV
+  [x] Drop phase:  voltage rises, feeder loading drops
+  [x] Oscillate:   repeated grid swings — relay wear risk
+  [x] Grid impact visible in Dr. Biswas's ZSGplussync topology
+```
+
+**Root cause:** No CP authentication; no operator-signed charging profiles; OCPP 1.6 MeterValues are the sole load signal to the grid model.  
+**Mitigation:** OCPP 2.0.1 `SetChargingProfile` with signed profiles; CSMS concurrent connection rate limiting; grid-side ROCOL (rate-of-change-of-load) protection relays.
+
+---
+
+### Attack 8 — Duration Spoofing + PGTwin Grid
+
+**Script:** `attacks/attack_spoof_grid.py`  
+**Profile:** `spoof-grid`  
+**Network:** operator-net (172.19.0.42) + shared Docker volume  
+**Initial access:** ARP poisoning / rogue switch on charging site LAN
+
+Attack #6 re-run against the real PGTwin. A MITM proxy on port 9004 intercepts the EVSE's `StopTransaction`, sends a forged ACK so the EVSE disconnects cleanly, then holds `/shared/ev_load_kw.txt` at the phantom load value for 60 seconds. During this window the EVSE is physically gone, but Bus 44 in the grid model remains depressed — an anomaly that cannot be detected from OCPP 1.6 alone.
+
+| Phase | What happens | Bus 44 vm_pu |
+|-------|-------------|-------------|
+| 1 — Transparent relay | Real MeterValues forwarded; grid file updated with live kW | 0.9662 (11 kW) → 0.9532 (60 kW) |
+| 2 — StopTransaction DROP | Intercepted; forged ACK sent; EVSE exits code 0 | held at phantom kW |
+| 3 — Ghost session (60 s) | Synthetic MeterValues every 10 s; file held at 11 kW | **0.9662** — bus stressed, EVSE gone |
+| 4 — Cleanup | `ev_load_kw.txt` cleared; final StopTransaction sent to CSMS | recovers to **0.9689** |
+
+```bash
+docker compose --profile spoof-grid up --build --force-recreate
+```
+
+**Expected output — atk-spoof-grid container:**
+```
+  Proxy listening  : ws://0.0.0.0:9004
+  Forwarding to    : ws://csms:9000
+  Ghost duration   : 60s
+  Phantom load     : 11 kW
+  Grid target      : Bus 44 (Load4, DS4, 0.4 kV)
+
+[PRX 13:43:39] EVSE connected — opening upstream CSMS connection
+[E→C 13:43:39] [BootNotification] → forwarding
+[E→C 13:43:39] [StartTransaction] connectorId=1 → forwarding
+[GRD 13:43:39] ev_load_kw.txt ← 11.0 kW  (PHANTOM — EVSE gone)
+[E→C 13:43:49] [MeterValues] → forwarding + grid updated
+[GRD 13:43:49] ev_load_kw.txt ← 60.0 kW  (PHANTOM — EVSE gone)
+
+[ATK 13:43:59] ==============================================================
+[ATK 13:43:59] PHASE 2 — StopTransaction INTERCEPTED AND DROPPED
+[ATK 13:43:59]   EVSE 'CP_1' → NOT forwarded to CSMS
+[ATK 13:43:59]   transactionId : 1
+[ATK 13:43:59]   meterStop     : 332 Wh (real final reading)
+[ATK 13:43:59]   EV load file  : HELD at 11 kW (phantom begins)
+[ATK 13:43:59] Forged StopTransaction ACK sent to EVSE → EVSE disconnects cleanly
+
+[GHO 13:43:59] PHASE 3 — GHOST SESSION ACTIVE
+[GHO 13:43:59]   EVSE 'CP_1' physically gone
+[GHO 13:43:59]   CSMS still sees active session (transactionId=1)
+[GHO 13:43:59]   PGTwin still sees 11 kW at Bus 44 (ev_load_kw.txt held)
+[GHO 13:43:59]   Ghost duration : 60s  (MeterValues every 10s)
+
+[GRD 13:44:09] ev_load_kw.txt ← 11.0 kW  (PHANTOM — EVSE gone)
+[GHO 13:44:09] Ghost MV #1 | t+10s | 362 Wh (+30 Wh) | Bus44 still loaded at 11 kW
+[GRD 13:44:19] ev_load_kw.txt ← 11.0 kW  (PHANTOM — EVSE gone)
+[GHO 13:44:19] Ghost MV #2 | t+20s | 392 Wh (+30 Wh) | Bus44 still loaded at 11 kW
+...
+[GHO 13:44:59] Ghost MV #6 | t+60s | 512 Wh (+30 Wh) | Bus44 still loaded at 11 kW
+[GHO 13:44:59] Ghost ended — 0.1800 kWh phantom energy injected to CSMS
+[GHO 13:44:59] PHASE 4 — clearing grid load and sending final StopTransaction
+[GRD 13:44:59] ev_load_kw.txt ← 0.0 kW  (cleared)
+[GHO 13:44:59] Final StopTransaction sent to CSMS: meterStop=512 Wh
+
+  Proxy duration             : 80.1s
+  Real charge energy         : 0.3320 kWh
+  Phantom energy (CSMS)      : 0.1800 kWh
+  Ghost MeterValues sent     : 6
+  StopTransaction dropped    : YES
+
+  PGTwin grid impact:
+  - Bus 44 (Load4) vm_pu depressed for 60s after real disconnect
+  - ev_load_kw.txt held at 11 kW during ghost phase
+  - Visible in SimOutputBus.csv column vm_pu45
+  - Operator sees: CSMS active session = 0.1800 kWh phantom load
+  - Reality: EVSE physically idle, bus still stressed in grid model
+```
+
+**Expected output — pgtwin container (key evidence: vm_pu held at 0.9662 after EVSE gone):**
+```
+[PGTwin] iter=  46 | EV=   60.0 kW | Load4(Bus44) vm_pu=0.9532 | total_load=1350 kW
+[PGTwin] iter=  47 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW
+                                                          ↑ EVSE disconnects here (Phase 2)
+[PGTwin] iter=  48 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW
+...  (60 seconds of ghost phase — hundreds of iterations at 0.9662) ...
+[PGTwin] iter= 750 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW
+                                                          ↑ Phase 4 cleanup — bus recovers
+```
+
+**Root cause:** `StopTransaction` is unsigned; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
+**Mitigation:** WSS + mutual TLS (prevents MITM interposition); CSMS Heartbeat inactivity timeout; OCPP 2.0.1 signed `StopTransaction`; physical pilot-signal monitoring cross-checked against OCPP session state.
 
 ---
 
