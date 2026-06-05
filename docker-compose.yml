@@ -9,14 +9,16 @@
 # They have zero visibility into operator-net.
 #
 # Usage:
-#   docker compose --profile normal   up   # CSMS + legitimate EVSE (baseline)
-#   docker compose --profile saiflow  up   # Attack 1 — SaiFlow DoS
-#   docker compose --profile fdi      up   # Attack 2 — False Data Injection
-#   docker compose --profile mitm     up   # Attack 3a — MITM proxy (INTERNAL, operator-net, ARP poisoning)
-#   docker compose --profile mitm-ext up   # Attack 3b — MITM proxy (EXTERNAL, public-net, BGP/DNS hijack)
-#   docker compose --profile load     up   # Attack 4 — coordinated load altering
-#   docker compose --profile firmware        up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
+#   docker compose --profile normal         up   # CSMS + legitimate EVSE (baseline)
+#   docker compose --profile saiflow        up   # Attack 1 — SaiFlow DoS
+#   docker compose --profile fdi            up   # Attack 2 — False Data Injection
+#   docker compose --profile mitm           up   # Attack 3a — MITM proxy (INTERNAL, operator-net, ARP poisoning)
+#   docker compose --profile mitm-ext       up   # Attack 3b — MITM proxy (EXTERNAL, public-net, BGP/DNS hijack)
+#   docker compose --profile load           up   # Attack 4 — coordinated load altering
+#   docker compose --profile firmware       up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
 #   docker compose --profile duration-spoof up   # Attack 6 — Duration Spoofing (StopTransaction drop)
+#   docker compose --profile load-grid      up   # Attack 7 — Coordinated Load Altering + PGTwin grid
+#   docker compose --profile spoof-grid     up   # Attack 8 — Duration Spoofing + PGTwin grid
 
 networks:
   operator-net:
@@ -242,3 +244,84 @@ services:
     depends_on:
       - atk-duration-spoof
     profiles: [duration-spoof]
+
+  # ── PGTwin Grid Simulator ────────────────────────────────────────────────────
+  # Shared by Attack 7 and Attack 8.  Reads /shared/ev_load_kw.txt before every
+  # runpp() and writes SimOutput*.csv to the same shared volume.
+
+  pgtwin:
+    build: .
+    container_name: pgtwin
+    hostname: pgtwin
+    command: python grid/ZSGplussync_docker.py
+    environment:
+      CSV_DIR: /shared
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.70
+    profiles: [load-grid, spoof-grid]
+
+  # ── Attack 7 · Coordinated Load Altering + PGTwin ───────────────────────────
+  # Threat model: external botnet, public-net only (same as Attack 4).
+  # Writes aggregated EV kW to shared volume; pgtwin injects it at Bus 44.
+
+  atk-load-grid:
+    build: .
+    container_name: atk-load-grid
+    hostname: atk-load-grid
+    command: sh -c "sleep 3 && python attacks/attack_load_grid.py"
+    environment:
+      CSMS_URL: ws://csms:9000
+      EV_LOAD_FILE: /shared/ev_load_kw.txt
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.41
+    depends_on:
+      - csms
+      - pgtwin
+    profiles: [load-grid]
+
+  # ── Attack 8 · Duration Spoofing + PGTwin ───────────────────────────────────
+  # Threat model: attacker on operator-net (ARP poisoning / rogue switch).
+  # Proxy intercepts StopTransaction; ghost phase holds ev_load_kw.txt at
+  # PHANTOM_KW so pgtwin shows Bus 44 depressed after the EVSE disconnects.
+
+  atk-spoof-grid:
+    build: .
+    container_name: atk-spoof-grid
+    hostname: atk-spoof-grid
+    command: sh -c "sleep 2 && python attacks/attack_spoof_grid.py"
+    environment:
+      CSMS_URL: ws://csms:9000
+      EV_LOAD_FILE: /shared/ev_load_kw.txt
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.42
+    depends_on:
+      - csms
+      - pgtwin
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    profiles: [spoof-grid]
+
+  evse-via-spoof-grid:
+    build: .
+    container_name: evse-via-spoof-grid
+    hostname: evse-via-spoof-grid
+    command: sh -c "sleep 4 && python core/evse_client4_fixed.py --url ws://atk-spoof-grid:9004 --session-duration 20"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.62
+    depends_on:
+      - atk-spoof-grid
+    profiles: [spoof-grid]
+
+volumes:
+  pgtwin-shared:
