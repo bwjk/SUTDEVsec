@@ -122,6 +122,72 @@ A legitimate EV charging station simulator backed by a live pandapower grid twin
 
 ---
 
+### PGTwin Grid Simulator — `grid/ZSGplussync_docker.py`
+
+Dr. Biswas's 7-substation Singapore distribution grid simulator, adapted for Docker/headless operation. It runs a continuous pandapower power-flow loop and exposes a file-based interface so attack containers can inject EV load without any network coupling — a shared Docker volume is the only bridge.
+
+**What it does:**
+
+- Builds a 48-bus Singapore-style distribution network spanning four voltage tiers: 66 kV (transmission), 22 kV (primary distribution), 6.6 kV (secondary distribution), and 0.4 kV (low-voltage end-users)
+- Instantiates 7 named loads mapped to real Singapore substations: Kampong Java, Tampines, Paya Lebar, Ayer Rajah, Jurong Pier, and Choa Chu Kang
+- Before every `runpp()` call, reads `/shared/ev_load_kw.txt` from the shared Docker volume and adds that value on top of **Load4's baseline** at Bus 44 (DS4, 0.4 kV small industry feeder, 100 kW nominal)
+- Runs `pandapower.runpp()` in a tight loop and writes power-flow results to four CSV files on the shared volume at every iteration
+- Prints real-time state to stdout: iteration number, EV kW injected, Bus 44 vm_pu, and total network load
+
+**Grid topology:**
+
+| Layer | Buses | Voltage | Key elements |
+|-------|-------|---------|-------------|
+| Transmission | Bus 0–8 | 66 kV | 1 slack generator (1.3607 MW), inter-substation lines |
+| Primary distribution | Bus 9–16 | 22 kV | 2 × 100 MVA transformers (66/22 kV) |
+| Secondary distribution | Bus 17–29 | 6.6 kV | 2 × 50 MVA transformers (22/6.6 kV) |
+| Low-voltage | Bus 30–47 | 0.4 kV | 2 × 25 MVA transformers (6.6/0.4 kV), 7 load buses |
+
+11 distribution lines · 32 circuit breakers/switches (some N/O for ring flexibility) · baseline total load 1.29 MW · generator headroom ~70.7 kW before Load4 injection.
+
+**EV injection point — Load4, Bus 44 (DS4, 0.4 kV):**
+
+| EV load | Bus 44 vm_pu | Total load | Δ from baseline |
+|---------|-------------|------------|----------------|
+| 0 kW (baseline) | 0.9689 pu | 1290 kW | — |
+| 11 kW | 0.9662 pu | 1301 kW | −0.0027 pu |
+| 22 kW | 0.9633 pu | 1312 kW | −0.0056 pu |
+| 44 kW | 0.9575 pu | 1334 kW | −0.0114 pu |
+| 55 kW (5 bots × 11) | 0.9546 pu | 1345 kW | −0.0143 pu |
+| 66 kW | 0.9515 pu | 1356 kW | −0.0174 pu |
+
+All steps stay within the 70.7 kW headroom, so `runpp()` always converges.
+
+**CSV outputs (written to `/shared` on the Docker volume at every iteration):**
+
+| File | Key columns |
+|------|-------------|
+| `SimOutputBus.csv` | `vm_pu45` = Bus 44 voltage — the primary attack evidence metric |
+| `SimOutputLine.csv` | `loading_percent40` = feeder line to Load4 |
+| `SimOutputPower.csv` | Per-line active/reactive power flows |
+| `SimOutputBreaker.csv` | Circuit breaker open/closed state per iteration |
+
+**Docker adaptations from Dr. Biswas's original `ZSGplussync.py`:**
+
+| Change | Reason |
+|--------|--------|
+| `matplotlib.use('Agg')` + GUI calls removed | Headless containers have no display |
+| `mqtt_publish_voltages()` → no-op | `mosquitto_pub` not installed in image |
+| `read_ev_load_kw()` added | Reads `/shared/ev_load_kw.txt` before each `runpp()` |
+| EV load injected as `net.load.at[3,'p_mw'] += ev_kw/1000` | Couples OCPP layer to physical grid model |
+
+**Default settings:**
+
+| Parameter | Value | Set via |
+|-----------|-------|---------|
+| EV load file | `/shared/ev_load_kw.txt` | hardcoded |
+| EV injection bus | Bus 44 (Load4, DS4, 0.4 kV) | `EV_LOAD_IDX = 3` |
+| Load4 baseline | 0.1 MW | `EV_LOAD_BASELINE_MW` |
+| CSV output directory | `/shared` | `CSV_DIR` env var |
+| Loop | continuous, no sleep | while True |
+
+---
+
 ## Containerised Network Topology
 
 Each component runs in its own container on a logically separate network segment. The CSMS is dual-homed. External attackers on `public-net` can only reach `172.20.0.10:9000` and have zero visibility into `operator-net`.
@@ -173,6 +239,46 @@ Each component runs in its own container on a logically separate network segment
   │  │  172.19.0.61             │                                                  │
   │  └──────────────────────────┘                                                  │
   └────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### PGTwin grid integration (Attacks 7, 8, 9)
+
+Attacks 7–9 add a second layer to the topology: a shared Docker volume bridges the OCPP protocol containers to the pandapower grid simulator. The attack container writes a single float (kW) to the volume; pgtwin reads it before every `runpp()` call.
+
+```
+  +---------------------------------------------------------------------------+
+  |              pgtwin-shared  *  Docker named volume                        |
+  |                                                                           |
+  |  /shared/ev_load_kw.txt      <- written by attack, read by pgtwin        |
+  |  /shared/SimOutputBus.csv    <- vm_pu45  = Bus 44 voltage (evidence)     |
+  |  /shared/SimOutputLine.csv   <- loading_percent40 = feeder to Load4      |
+  +==========================+================================================+
+                             | reads before each runpp()
+                             v
+           +-----------------------------------------+
+           |  pgtwin  172.19.0.70  (operator-net)    |
+           |  ZSGplussync_docker.py                   |
+           |  7-substation Singapore grid             |
+           |  66 kV -> 22 kV -> 6.6 kV -> 0.4 kV    |
+           |  EV injection : Load4, Bus 44, DS4       |
+           |  Baseline vm_pu = 0.9689                 |
+           +-----------------------------------------+
+
+  writes ^                writes ^                writes ^
+         |                       |                       |
+  +------+--------+   +----------+----------+   +--------+-----------------+
+  | atk-overload  |   |  atk-load-grid      |   |  atk-spoof-grid          |
+  | -grid         |   |  172.20.0.41        |   |  172.19.0.42             |
+  | 172.20.0.42   |   |  public-net         |   |  proxy :9004             |
+  | public-net    |   |                     |   |  operator-net            |
+  |               |   |  5-bot OCPP botnet  |   |  drops StopTransaction   |
+  | single rogue  |   |  surge / drop /     |   |  holds phantom load      |
+  | EVSE          |   |  oscillate phases   |   |                          |
+  | 0->66 kW ramp |   |  (Attack 8)         |   |  <- evse-via-spoof-grid  |
+  | (Attack 7)    |   |                     |   |     172.19.0.62          |
+  +---------------+   +---------------------+   |     operator-net         |
+                                                 |     (Attack 9)           |
+                                                 +--------------------------+
 ```
 
 ### Threat model per attack
@@ -863,15 +969,15 @@ docker compose --profile overload-grid up --build --force-recreate
 [PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).
 [PGTwin] iter=   1 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← baseline
 ...
-[PGTwin] iter=  51 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW  ← step 1
+[PGTwin] iter= 427 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW  ← step 1
 ...
-[PGTwin] iter= 101 | EV=   22.0 kW | Load4(Bus44) vm_pu=0.9632 | total_load=1312 kW  ← step 2
+[PGTwin] iter= 866 | EV=   22.0 kW | Load4(Bus44) vm_pu=0.9633 | total_load=1312 kW  ← step 2
 ...
-[PGTwin] iter= 201 | EV=   44.0 kW | Load4(Bus44) vm_pu=0.9575 | total_load=1334 kW  ← step 3
+[PGTwin] iter=1301 | EV=   44.0 kW | Load4(Bus44) vm_pu=0.9575 | total_load=1334 kW  ← step 3
 ...
-[PGTwin] iter= 301 | EV=   66.0 kW | Load4(Bus44) vm_pu=0.9517 | total_load=1356 kW  ← step 4
+[PGTwin] iter=1772 | EV=   66.0 kW | Load4(Bus44) vm_pu=0.9515 | total_load=1356 kW  ← step 4
 ...
-[PGTwin] iter= 401 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← recovery
+[PGTwin] iter=2723 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← recovery
 ```
 
 **Expected output — atk-overload-grid container:**
