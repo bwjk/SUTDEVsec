@@ -381,6 +381,88 @@ docker logs -f pgtwin
 docker compose --profile <profile> down --remove-orphans
 ```
 
+### Observing grid impact (Attacks 7, 8, 9)
+
+Grid attacks produce evidence at three levels: real-time container stdout, persistent CSV files on the shared Docker volume, and the live coupling file itself.
+
+#### Real-time: pgtwin stdout
+
+The most immediate view. Every `runpp()` iteration emits one line:
+
+```
+[PGTwin] iter=1301 | EV=   44.0 kW | Load4(Bus44) vm_pu=0.9575 | total_load=1334 kW
+```
+
+Watch it live while an attack profile is running:
+
+```bash
+docker logs -f pgtwin
+```
+
+You see vm_pu change in real time as each attack phase fires — stepping down across overload steps (Attack 7), surging and recovering during botnet phases (Attack 8), or holding depressed for 60 s after the EVSE exits (Attack 9).
+
+#### Grid CSV files (shared volume)
+
+pgtwin writes four CSV files to `/shared` at every iteration. These persist the full run history and are the primary thesis evidence artefacts.
+
+**Extract the files:**
+
+```bash
+# Copy to current directory while containers are running (or after)
+docker cp pgtwin:/shared/SimOutputBus.csv  .
+docker cp pgtwin:/shared/SimOutputLine.csv .
+
+# Or tail directly without copying
+docker exec pgtwin tail -20 /shared/SimOutputBus.csv
+```
+
+**Key columns:**
+
+| File | Column | What it shows |
+|------|--------|---------------|
+| `SimOutputBus.csv` | `vm_pu45` | Bus 44 voltage in pu — primary impact metric |
+| `SimOutputLine.csv` | `loading_percent40` | Feeder line loading to Load4 (%) |
+| `SimOutputPower.csv` | `p_from_mw40` | Active power on Load4 feeder (MW) |
+| `SimOutputBreaker.csv` | all | Circuit breaker open/closed state |
+
+> **Column naming:** buses and lines are 1-indexed in the CSV header. `vm_pu45` corresponds to pandapower Bus index 44 (Bus 44, DS4, 0.4 kV).
+
+**Quick Python analysis:**
+
+```python
+import pandas as pd
+
+bus  = pd.read_csv("SimOutputBus.csv")
+line = pd.read_csv("SimOutputLine.csv")
+
+# Voltage range at Bus 44 across the full run
+print(bus["vm_pu45"].describe())
+
+# Plot voltage timeline
+bus["vm_pu45"].plot(title="Bus 44 vm_pu — EV injection point")
+
+# Feeder loading
+print(line["loading_percent40"].describe())
+```
+
+#### Live coupling file
+
+`/shared/ev_load_kw.txt` contains the float currently being injected into the grid model. Poll it during a run to watch phase transitions in real time:
+
+```bash
+watch -n1 "docker exec pgtwin cat /shared/ev_load_kw.txt"
+```
+
+For Attack 9, this file holds a non-zero value for 60 s **after** `evse-via-spoof-grid exited with code 0` appears in compose logs — that persistent non-zero is the phantom grid load the CSMS cannot detect from OCPP alone.
+
+#### Attack-specific evidence summary
+
+| Attack | Watch for in `pgtwin` logs | Key CSV evidence |
+|--------|---------------------------|-----------------|
+| **7 — Single EVSE overload** | Staircase: `vm_pu` steps down at each 20 s mark | `vm_pu45`: 0.9689 → 0.9662 → 0.9633 → 0.9575 → 0.9515, then recovery to 0.9689 |
+| **8 — Botnet load altering** | `vm_pu` jumps between 0.9546 (surge) and 0.9689 (drop) every 30 s | Oscillate phase shows alternating rows at both values every 5 s |
+| **9 — Duration spoofing** | `vm_pu=0.9662` persists after `evse-via-spoof-grid exited with code 0` | 60-row gap at vm_pu=0.9662 after physical disconnect; recovery only when `ev_load_kw.txt ← 0.0` |
+
 ### Automated pcap capture
 
 `capture_attacks.ps1` automates the full capture workflow for each profile: builds containers, waits for initialisation, runs `tcpdump` inside the capture container for the configured window, extracts the pcap, and tears down.
