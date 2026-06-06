@@ -1,6 +1,6 @@
 """
 ===========================================================================
-EVSecSim — Attack #8: Duration Spoofing + PGTwin Grid Impact
+EVSecSim — Attack #9: Duration Spoofing + PGTwin Grid Impact
 ===========================================================================
 
 WHAT THIS IS
@@ -452,7 +452,7 @@ async def run_proxy():
     )
 
     print(f"\n{BOLD}{RED}{'='*62}{RESET}")
-    print(f"{BOLD}{RED}  EVSecSim — Attack #8: Duration Spoofing + PGTwin{RESET}")
+    print(f"{BOLD}{RED}  EVSecSim — Attack #9: Duration Spoofing + PGTwin{RESET}")
     print(f"{BOLD}{RED}{'='*62}{RESET}")
     print(f"  Proxy listening  : ws://0.0.0.0:{PROXY_PORT}")
     print(f"  Forwarding to    : {CSMS_URL}")
@@ -486,7 +486,7 @@ async def run_proxy():
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="EVSecSim Attack #8 — Duration Spoofing with PGTwin grid integration"
+        description="EVSecSim Attack #9 — Duration Spoofing with PGTwin grid integration"
     )
     parser.add_argument("--proxy-port",     type=int,   default=PROXY_PORT)
     parser.add_argument("--csms-url",       default=CSMS_URL)

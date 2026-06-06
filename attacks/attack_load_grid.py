@@ -1,6 +1,6 @@
 """
 ===========================================================================
-EVSecSim — Attack #7: Coordinated Load Altering + PGTwin Grid Impact
+EVSecSim — Attack #8: Coordinated Load Altering + PGTwin Grid Impact
 ===========================================================================
 
 WHAT THIS IS
@@ -8,7 +8,7 @@ WHAT THIS IS
 Attack #4 (attack_load_altering.py) already proves the OCPP-layer botnet
 mechanism using a toy a6breakers grid twin.
 
-Attack #7 is the SAME OCPP attack, connected to Dr. Biswas's real 7-substation
+Attack #8 is the SAME OCPP attack, connected to Dr. Biswas's real 7-substation
 PGTwin grid (ZSGplussync_docker.py).  The difference is how grid impact is
 measured: instead of an internal pandapower model, this script writes the
 aggregated EV load to a shared Docker volume file (/shared/ev_load_kw.txt)
@@ -234,7 +234,7 @@ class FleetController:
 
     # ------------------------------------------------------------------
     def print_summary(self):
-        banner("ATTACK 7 COMPLETE", CYAN)
+        banner("ATTACK 8 COMPLETE", CYAN)
         print(f"  Fleet size   : {len(self.bots)} bots × {CHARGER_KW:.0f} kW")
         print(f"  Peak load    : {len(self.bots)*CHARGER_KW:.0f} kW injected at Bus 44 (Load4)")
         print()
@@ -285,7 +285,7 @@ async def connect_bot(cp_id: str, bots: list, ready_event: asyncio.Event):
 # ===========================================================================
 
 async def main():
-    banner("EVSecSim — Attack #7: Load Altering + PGTwin Grid", RED)
+    banner("EVSecSim — Attack #8: Load Altering + PGTwin Grid", RED)
     print(f"  CSMS           : {CSMS_URL}")
     print(f"  Bot fleet      : {N_BOTS} chargers × {CHARGER_KW:.0f} kW")
     print(f"  EV load file   : {EV_LOAD_FILE}")
@@ -344,7 +344,7 @@ async def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="EVSecSim Attack #7 — Load Altering with PGTwin grid integration"
+        description="EVSecSim Attack #8 — Load Altering with PGTwin grid integration"
     )
     parser.add_argument("--bots",     type=int,   default=N_BOTS,
                         help="Number of compromised chargers (default 10)")

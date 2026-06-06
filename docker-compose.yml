@@ -17,8 +17,9 @@
 #   docker compose --profile load           up   # Attack 4 — coordinated load altering
 #   docker compose --profile firmware       up   # Attack 5 — Malicious Firmware Update (INL PoC #3)
 #   docker compose --profile duration-spoof up   # Attack 6 — Duration Spoofing (StopTransaction drop)
-#   docker compose --profile load-grid      up   # Attack 7 — Coordinated Load Altering + PGTwin grid
-#   docker compose --profile spoof-grid     up   # Attack 8 — Duration Spoofing + PGTwin grid
+#   docker compose --profile overload-grid  up   # Attack 7 — Single EVSE Grid Overload + PGTwin intro
+#   docker compose --profile load-grid      up   # Attack 8 — Coordinated Load Altering + PGTwin grid
+#   docker compose --profile spoof-grid     up   # Attack 9 — Duration Spoofing + PGTwin grid
 
 networks:
   operator-net:
@@ -261,9 +262,32 @@ services:
     networks:
       operator-net:
         ipv4_address: 172.19.0.70
-    profiles: [load-grid, spoof-grid]
+    profiles: [overload-grid, load-grid, spoof-grid]
 
-  # ── Attack 7 · Coordinated Load Altering + PGTwin ───────────────────────────
+  # ── Attack 7 · Single EVSE Grid Overload + PGTwin ──────────────────────────
+  # Threat model: single rogue EVSE on public-net reports inflated MeterValues.
+  # Steps from 0 → 11 → 22 → 44 → 66 kW, each held for STEP_DURATION_S seconds.
+  # Produces a monotonic Bus 44 voltage sag — introductory PGTwin demonstration.
+
+  atk-overload-grid:
+    build: .
+    container_name: atk-overload-grid
+    hostname: atk-overload-grid
+    command: sh -c "sleep 3 && python attacks/attack_overload_grid.py"
+    environment:
+      CSMS_URL: ws://csms:9000
+      EV_LOAD_FILE: /shared/ev_load_kw.txt
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.42
+    depends_on:
+      - csms
+      - pgtwin
+    profiles: [overload-grid]
+
+  # ── Attack 8 · Coordinated Load Altering + PGTwin ───────────────────────────
   # Threat model: external botnet, public-net only (same as Attack 4).
   # Writes aggregated EV kW to shared volume; pgtwin injects it at Bus 44.
 
