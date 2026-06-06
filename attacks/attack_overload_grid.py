@@ -21,12 +21,12 @@ Its purpose is to:
 
 ATTACK STEPS
 ------------
-  Step 0 —  0 kW : no EV, pure baseline          → vm_pu ≈ 0.9689
-  Step 1 — 11 kW : nominal Level-2 AC charger    → vm_pu ≈ 0.9662
-  Step 2 — 22 kW : 2× nominal (over-report)      → vm_pu ≈ 0.9632
-  Step 3 — 44 kW : 4× nominal                    → vm_pu ≈ 0.9575
-  Step 4 — 66 kW : 6× nominal, near headroom     → vm_pu ≈ 0.9517
-  Step 5 —  0 kW : cleanup, bus recovers
+  Step 0 —  0 kW : no EV, pure baseline          → vm_pu = 0.9689
+  Step 1 — 11 kW : nominal Level-2 AC charger    → vm_pu = 0.9662
+  Step 2 — 22 kW : 2× nominal (over-report)      → vm_pu = 0.9633
+  Step 3 — 44 kW : 4× nominal                    → vm_pu = 0.9575
+  Step 4 — 66 kW : 6× nominal, near headroom     → vm_pu = 0.9515
+  Step 5 —  0 kW : cleanup, bus recovers         → vm_pu = 0.9689
 
 Generator headroom is 70.7 kW (slack at 1360.7 kW − base loads 1290 kW).
 All steps stay within headroom so runpp() converges at every step.
@@ -202,9 +202,9 @@ async def main():
             print(f"  - Column vm_pu45: Bus 44 voltage — decreases with each step")
             print(f"  - Expected:  0 kW → 0.9689 pu")
             print(f"               11 kW → 0.9662 pu")
-            print(f"               22 kW → 0.9632 pu")
+            print(f"               22 kW → 0.9633 pu")
             print(f"               44 kW → 0.9575 pu")
-            print(f"               66 kW → 0.9517 pu")
+            print(f"               66 kW → 0.9515 pu")
             print(f"                0 kW → 0.9689 pu  (recovery)")
             print()
             print(f"  {YELLOW}Thesis evidence checklist:{RESET}")

@@ -849,9 +849,9 @@ This attack is intentionally simpler than the botnet attacks that follow. Its ro
 |------|--------------|-------------|------------|
 | 0 — Baseline | 0 kW | **0.9689** | 1290 kW |
 | 1 — Nominal | 11 kW | **0.9662** | 1301 kW |
-| 2 — 2× over-report | 22 kW | **0.9632** | 1312 kW |
+| 2 — 2× over-report | 22 kW | **0.9633** | 1312 kW |
 | 3 — 4× over-report | 44 kW | **0.9575** | 1334 kW |
-| 4 — 6× over-report | 66 kW | **0.9517** | 1356 kW |
+| 4 — 6× over-report | 66 kW | **0.9515** | 1356 kW |
 | 5 — Cleanup | 0 kW | **0.9689** | 1290 kW |
 
 ```bash
@@ -907,9 +907,9 @@ docker compose --profile overload-grid up --build --force-recreate
   - Column vm_pu45: Bus 44 voltage — decreases with each step
   - Expected:  0 kW → 0.9689 pu
                11 kW → 0.9662 pu
-               22 kW → 0.9632 pu
+               22 kW → 0.9633 pu
                44 kW → 0.9575 pu
-               66 kW → 0.9517 pu
+               66 kW → 0.9515 pu
                 0 kW → 0.9689 pu  (recovery)
 
   Thesis evidence checklist:
