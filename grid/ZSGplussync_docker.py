@@ -363,13 +363,13 @@ if __name__ == "__main__":
     # pplt.simple_plot(net, plot_line_switches=True)   # CHANGE 2: removed, no GUI
     pgt.prep_csv_files(net)
 
-    runpp(net)
+    runpp(net, numba=False)
     # pplt.simple_plot(net, plot_line_switches=True)   # CHANGE 2: removed, no GUI
     pgt.write_to_csv_files(net)
     numloads = len(net.load)
 
     iteration = 1
-    runpp(net)
+    runpp(net, numba=False)
     print("[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).")
     print(f"[PGTwin] Watching: {EV_LOAD_FILE}")
     print(f"[PGTwin] CSV output: {os.environ.get('CSV_DIR', '/shared')}/SimOutput*.csv")
@@ -385,7 +385,7 @@ if __name__ == "__main__":
             net.load.at[EV_LOAD_IDX, 'p_mw'] = EV_LOAD_BASELINE_MW + (ev_kw / 1000.0)
             # ─────────────────────────────────────────────────────────────────
 
-            runpp(net)
+            runpp(net, numba=False)
             # pplt.simple_plot(net, plot_line_switches=True)   # CHANGE 2: removed
 
             pgt.write_to_csv_files(net)
