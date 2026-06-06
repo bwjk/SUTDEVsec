@@ -126,6 +126,59 @@ A legitimate EV charging station simulator backed by a live pandapower grid twin
 
 Dr. Biswas's 7-substation Singapore distribution grid simulator, adapted for Docker/headless operation. It runs a continuous pandapower power-flow loop and exposes a file-based interface so attack containers can inject EV load without any network coupling — a shared Docker volume is the only bridge.
 
+**Grid topology:**
+
+```
+PGTwin — Singapore 7-Substation Distribution Network (48 buses)
+================================================================
+
+  66 kV  TRANSMISSION
+  ----------------------------------------------------------------
+  [G] 1.3607 MW (slack)
+   |
+  B0 --QG1-- B1 --+--QT1-1-- B2 --15km-- B5 --QT1-2-- B7
+                   +--QT2-1-- B4 --15km-- B6 --QT2-2-- B8
+                                          |             |
+                                    [T1] 100 MVA  [T2] 100 MVA
+                                    66 / 22 kV    66 / 22 kV
+
+  22 kV  PRIMARY DISTRIBUTION
+  ----------------------------------------------------------------
+  B9  --QT1-3-- B11 --10km-- B13 --QT1-4-- B15
+  B10 --QT2-3-- B12 --10km-- B14 --QT2-4-- B16
+                                    |               |
+                              [T3] 50 MVA    [T4] 50 MVA
+                              22 / 6.6 kV    22 / 6.6 kV
+
+  6.6 kV  SECONDARY DISTRIBUTION
+  ----------------------------------------------------------------
+  B17 --QT1-5-- B19 --+--QD1-1-- B21   Load1  1.0 MW  Industrial  DS2
+                       +--QT1-6-- B23 --5km-- B27 --QT1-7-- B29
+  B18 --QT2-5-- B20 --QT2-6-- B25 --5km-- B26 --QT2-7-- B28
+                                                    |           |
+                                             [T6] 25 MVA  [T5] 25 MVA
+                                             6.6 / 0.4 kV 6.6 / 0.4 kV
+
+  0.4 kV  LOW VOLTAGE  (DS3 / DS4)
+  ----------------------------------------------------------------
+  B31 --QT1-8-- B33 --QT1-9-- B35 --0.5km-- B41 --+--QD1-2-- B46  Load6  50 kW  Res  DS4
+                                                    +--QD1-3-- B47  Load7  30 kW  Res  DS4
+
+  B30 --QT2-8-- B32 --+--QT2-9-- B36 --0.5km-- B39 --+--QD2-1-- B42  Load2  50 kW  Res  DS3
+                       |                               +--QD2-2-- B43  Load3  30 kW  Res  DS3
+                       +--QT2-10-- B37 --0.5km-- B40 --+--QD2-3-- B44  Load4 100 kW  SmInd DS4  <-- EV
+                                                        +--QD2-4-- B45  Load5  30 kW  Res  DS4
+
+  ----------------------------------------------------------------
+  N/O tie switches (ring flexibility, normally open):
+    QT1-10: B19 <-> B24    QT2-11: B20 <-> B22
+    QT2-12: B32 <-> B34    QT1-11: B33 <-> B38
+  ================================================================
+  EV injection point:  Bus 44  (Load4, DS4, 0.4 kV, small industry)
+    Baseline vm_pu = 0.9689  (387.6 V)   total load = 1290 kW
+    At +66 kW EV:  vm_pu = 0.9515  (380.6 V)   total load = 1356 kW
+```
+
 **What it does:**
 
 - Builds a 48-bus Singapore-style distribution network spanning four voltage tiers: 66 kV (transmission), 22 kV (primary distribution), 6.6 kV (secondary distribution), and 0.4 kV (low-voltage end-users)
