@@ -385,7 +385,14 @@ if __name__ == "__main__":
             net.load.at[EV_LOAD_IDX, 'p_mw'] = EV_LOAD_BASELINE_MW + (ev_kw / 1000.0)
             # ─────────────────────────────────────────────────────────────────
 
-            runpp(net, numba=False)
+            try:
+                runpp(net, numba=False)
+            except Exception as e:
+                print(f"[PGTwin] WARNING: power flow did not converge "
+                      f"(EV={ev_kw:.1f} kW) — {e}")
+                net.load.at[EV_LOAD_IDX, 'p_mw'] = EV_LOAD_BASELINE_MW
+                iteration += 1
+                continue
             # pplt.simple_plot(net, plot_line_switches=True)   # CHANGE 2: removed
 
             pgt.write_to_csv_files(net)

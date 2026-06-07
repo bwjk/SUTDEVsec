@@ -21,12 +21,15 @@ Its purpose is to:
 
 ATTACK STEPS
 ------------
-  Step 0 —  0 kW : no EV, pure baseline          → vm_pu = 0.9689
-  Step 1 — 11 kW : nominal Level-2 AC charger    → vm_pu = 0.9662
-  Step 2 — 22 kW : 2× nominal (over-report)      → vm_pu = 0.9633
-  Step 3 — 44 kW : 4× nominal                    → vm_pu = 0.9575
-  Step 4 — 66 kW : 6× nominal, near headroom     → vm_pu = 0.9515
-  Step 5 —  0 kW : cleanup, bus recovers         → vm_pu = 0.9689
+  Step 0 —   0 kW : no EV, pure baseline           → vm_pu = 0.9689
+  Step 1 — 100 kW : 9× Level-2 AC rating          → vm_pu ≈ 0.943  (below IEC 0.95 limit)
+  Step 2 — 200 kW : 18× rating, severe over-report → vm_pu ≈ 0.916  (protection relay risk)
+  Step 3 — 300 kW : 27× rating, near collapse      → vm_pu ≈ 0.889  (critical under-voltage)
+  Step 4 —   0 kW : cleanup, bus recovers          → vm_pu = 0.9689
+
+  Key thresholds crossed:
+    0.950 pu  IEC 60038 lower operating limit   (~72 kW, between steps 0 and 1)
+    0.900 pu  Critical under-voltage / relay    (~261 kW, between steps 2 and 3)
 
 Generator headroom is 70.7 kW (slack at 1360.7 kW − base loads 1290 kW).
 All steps stay within headroom so runpp() converges at every step.
@@ -69,7 +72,7 @@ warnings.filterwarnings('ignore')
 CSMS_URL        = os.environ.get('CSMS_URL', 'ws://csms:9000')
 EV_LOAD_FILE    = os.environ.get('EV_LOAD_FILE', '/shared/ev_load_kw.txt')
 
-OVERLOAD_STEPS_KW = [0.0, 11.0, 22.0, 44.0, 66.0, 0.0]   # kW per step
+OVERLOAD_STEPS_KW = [0.0, 100.0, 200.0, 300.0, 0.0]       # kW per step
 STEP_DURATION_S   = 20    # seconds each step is held
 METER_INTERVAL_S  = 2     # MeterValues send frequency within each step
 
@@ -200,12 +203,11 @@ async def main():
             print()
             print(f"  {YELLOW}Grid evidence (read SimOutputBus.csv from shared volume):{RESET}")
             print(f"  - Column vm_pu45: Bus 44 voltage — decreases with each step")
-            print(f"  - Expected:  0 kW → 0.9689 pu")
-            print(f"               11 kW → 0.9662 pu")
-            print(f"               22 kW → 0.9633 pu")
-            print(f"               44 kW → 0.9575 pu")
-            print(f"               66 kW → 0.9515 pu")
-            print(f"                0 kW → 0.9689 pu  (recovery)")
+            print(f"  - Expected:    0 kW → 0.9689 pu  (baseline)")
+            print(f"               100 kW → ~0.943 pu  (below IEC 0.95 limit)")
+            print(f"               200 kW → ~0.916 pu  (protection relay risk)")
+            print(f"               300 kW → ~0.889 pu  (critical under-voltage)")
+            print(f"                 0 kW → 0.9689 pu  (recovery)")
             print()
             print(f"  {YELLOW}Thesis evidence checklist:{RESET}")
             print(f"  [x] Single rogue EVSE: no authentication, any ID accepted")
