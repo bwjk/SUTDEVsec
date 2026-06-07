@@ -443,7 +443,7 @@ Grid attacks produce evidence at three levels: real-time container stdout, persi
 The most immediate view. Every `runpp()` iteration emits one line:
 
 ```
-[PGTwin] iter=1301 | EV=   44.0 kW | Load4(Bus44) vm_pu=0.9575 | total_load=1334 kW
+[PGTwin] iter=1330 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW
 ```
 
 Watch it live while an attack profile is running:
@@ -512,7 +512,7 @@ For Attack 9, this file holds a non-zero value for 60 s **after** `evse-via-spoo
 
 | Attack | Watch for in `pgtwin` logs | Key CSV evidence |
 |--------|---------------------------|-----------------|
-| **7 — Single EVSE overload** | Staircase: `vm_pu` steps down at each 20 s mark | `vm_pu45`: 0.9689 → 0.9662 → 0.9633 → 0.9575 → 0.9515, then recovery to 0.9689 |
+| **7 — Single EVSE overload** | Staircase: `vm_pu` drops at each 20 s mark | `vm_pu45`: 0.9689 → 0.9418 → 0.9093 → 0.8694, then recovery to 0.9689 |
 | **8 — Botnet load altering** | `vm_pu` jumps between 0.9546 (surge) and 0.9689 (drop) every 30 s | Oscillate phase shows alternating rows at both values every 5 s |
 | **9 — Duration spoofing** | `vm_pu=0.9662` persists after `evse-via-spoof-grid exited with code 0` | 60-row gap at vm_pu=0.9662 after physical disconnect; recovery only when `ev_load_kw.txt ← 0.0` |
 
