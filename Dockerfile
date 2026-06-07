@@ -16,5 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends tcpdump procps 
 COPY core/ ./core/
 COPY attacks/ ./attacks/
 COPY grid/ ./grid/
+COPY v201/ ./v201/
 
 CMD ["python", "core/csms_server4.py"]

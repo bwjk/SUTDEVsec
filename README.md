@@ -33,19 +33,26 @@ SUTDEVsec/
 │   └── evse_client4_fixed.py       # Legitimate EVSE client + pandapower grid simulation
 ├── grid/
 │   └── ZSGplussync_docker.py       # PGTwin: 7-substation Singapore grid (Dr. Biswas)
-└── attacks/
-    ├── run_attacks.py                  # Interactive orchestrator (local use)
-    ├── attack_saiflow_dos_patched.py   # Attack 1:  SaiFlow duplicate-CP DoS
-    ├── attack_fdi.py                   # Attack 2:  MeterValues False Data Injection
-    ├── attack_mitm_session_patched.py  # Attack 3a: MITM proxy — internal (operator-net)
-    ├── attack_mitm_ext.py              # Attack 3b: MITM proxy — external (public-net)
-    ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
-    ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
-    ├── attack_duration_spoof.py        # Attack 6:  Duration spoofing (StopTransaction drop)
-    ├── attack_overload_grid.py         # Attack 7:  Single EVSE grid overload + PGTwin intro
-    ├── attack_load_grid.py             # Attack 8:  Coordinated load altering + PGTwin grid
-    ├── attack_spoof_grid.py            # Attack 9:  Duration spoofing + PGTwin grid
-    └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
+├── attacks/                        # ── OCPP 1.6 track (Attacks 1–9) ──
+│   ├── run_attacks.py                  # Interactive orchestrator (local use)
+│   ├── attack_saiflow_dos_patched.py   # Attack 1:  SaiFlow duplicate-CP DoS
+│   ├── attack_fdi.py                   # Attack 2:  MeterValues False Data Injection
+│   ├── attack_mitm_session_patched.py  # Attack 3a: MITM proxy — internal (operator-net)
+│   ├── attack_mitm_ext.py              # Attack 3b: MITM proxy — external (public-net)
+│   ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
+│   ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
+│   ├── attack_duration_spoof.py        # Attack 6:  Duration spoofing (StopTransaction drop)
+│   ├── attack_overload_grid.py         # Attack 7:  Single EVSE grid overload + PGTwin intro
+│   ├── attack_load_grid.py             # Attack 8:  Coordinated load altering + PGTwin grid
+│   ├── attack_spoof_grid.py            # Attack 9:  Duration spoofing + PGTwin grid
+│   └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
+└── v201/                           # ── OCPP 2.0.1 track (separate CSMS, port 9100) ──
+    ├── core/
+    │   ├── csms_server_v201.py         # OCPP 2.0.1 CSMS (plaintext / Profile-1 equiv.)
+    │   └── evse_client_v201.py         # Legitimate 2.0.1 EVSE (baseline)
+    └── attacks/
+        ├── attack_fdi_v201.py          # 2.0.1 False Data Injection (survives 2.0.1)
+        └── attack_overload_v201.py     # 2.0.1 Single EVSE overload + PGTwin grid
 ```
 
 ---
@@ -1343,6 +1350,99 @@ Builds the full grid twin (220 kV → 66 kV → 22 kV, 7 town loads × 200 MW, 5
 ```bash
 python attacks/a6breakers.py
 ```
+
+---
+
+## OCPP 2.0.1 Attack Track
+
+A separate, self-contained track that re-runs the **data-integrity attacks** against an OCPP **2.0.1** CSMS. It is independent of Attacks 1–9 (those remain OCPP 1.6) and lives entirely under `v201/`.
+
+### Why this track exists, and what it deliberately is not
+
+This track runs on **plaintext `ws://` — the OCPP 2.0.1 insecure-profile equivalent (Security Profile 1: no TLS, no mutual-TLS).** That is intentional. The goal is to isolate **one variable** — the message model — and answer a precise question:
+
+> *When you migrate an attack from OCPP 1.6 to 2.0.1's message format, does it still work?*
+
+The comparison is therefore **1.6-plaintext vs 2.0.1-plaintext**. The only thing that changes is the envelope: 2.0.1 replaces `StartTransaction` / `MeterValues` / `StopTransaction` with a unified `TransactionEvent` (Started / Updated / Ended), and nests `BootNotification` under `chargingStation` + `reason`.
+
+**Only the attacks that survive 2.0.1 are ported** (per the compatibility evaluation — see `OCPP_2.0.1_Compatibility_Evaluation.docx`):
+
+| 1.6 Attack | Ported to 2.0.1? | Reason |
+|-----------|------------------|--------|
+| 2 — False Data Injection | ✅ `attack_fdi_v201.py` | Authenticated-insider data lie; no plausibility check in 2.0.1 |
+| 7 — Single EVSE Overload | ✅ `attack_overload_v201.py` | Same data-integrity class; drives PGTwin via shared volume |
+| 3a / 3b / 6 — MITM family | ❌ excluded | Defeated by **TLS** (the security profile), not the protocol version |
+| 5 — Firmware RCE | ❌ excluded | Defeated by **signed firmware** (the security profile), not the version |
+
+MITM and firmware are excluded **because** 2.0.1 prevents them — but only via TLS/signing, which is a *security-profile* property, not a *protocol-version* one. Demonstrating those mitigations requires a TLS/mutual-TLS track, which is **deferred**.
+
+### Architecture
+
+The OCPP 2.0.1 CSMS runs on **port 9100** (vs 9000 for 1.6), dual-homed on both networks. The grid coupling is unchanged — **PGTwin never parses OCPP; it reads a kW float from `/shared/ev_load_kw.txt`** — so the 2.0.1 overload drives the exact same grid response as the 1.6 version.
+
+```
+  v201/attacks/*  ──(OCPP 2.0.1 TransactionEvent)──►  csms-v201 :9100
+        │                                                  (logs power, no check)
+        └──(writes kW float, overload only)──► /shared/ev_load_kw.txt ──► pgtwin
+```
+
+### Run scenarios
+
+```bash
+# 2.0.1 baseline — CSMS + legitimate 2.0.1 EVSE (honest TransactionEvents)
+docker compose --profile v201-normal up --build
+
+# 2.0.1 False Data Injection — compromised authenticated charger lies via TransactionEvent
+docker compose --profile v201-fdi up --build
+
+# 2.0.1 Single EVSE Overload + PGTwin grid (same staircase as 1.6 Attack 7)
+docker compose --profile v201-overload-grid up --build --force-recreate
+```
+
+### Attack A — False Data Injection on 2.0.1 (`attack_fdi_v201.py`)
+
+The 2.0.1 re-implementation of Attack 2. A compromised but authenticated charger fabricates its power in `TransactionEvent[Updated]` frames. Three phases: honest → under-report (hide load) → over-report (phantom load).
+
+**Verified CSMS-v201 output (key evidence — the operator sees the lie, logged verbatim):**
+```
+[CSMS-v201] Connected: CP-201-1
+[CSMS-v201] BootNotification from: CP-201-1 (Compromised-Vendor / FDI-Demo-201) reason=PowerUp
+[CSMS-v201] CP-201-1 | TransactionEvent[Updated] txId=TX-201-FDI seq=1  | Power = 60.0 kW   ← Phase 1 honest
+[CSMS-v201] CP-201-1 | TransactionEvent[Updated] txId=TX-201-FDI seq=11 | Power = 0.0 kW     ← Phase 2 hides 60 kW
+[CSMS-v201] CP-201-1 | TransactionEvent[Updated] txId=TX-201-FDI seq=17 | Power = 999.0 kW   ← Phase 3 phantom load
+```
+
+The gap between what the charger draws and what the CSMS logs is identical to the 1.6 attack — proving the vulnerability is in the **data layer**, not the protocol version. This holds **regardless of security profile**: TLS/mutual-TLS authenticate the channel and device, not the truthfulness of the data.
+
+### Attack B — Single EVSE Overload on 2.0.1 (`attack_overload_v201.py`)
+
+The 2.0.1 re-implementation of Attack 7. A single rogue charger reports inflated power via `TransactionEvent[Updated]` and writes the same `/shared/ev_load_kw.txt` the 1.6 version does.
+
+**Verified — the 2.0.1 attack chain end-to-end:**
+```
+# CSMS-v201 logs the fabricated TransactionEvent power (no plausibility check):
+[CSMS-v201] ATK-201-OVERLOAD-001 | TransactionEvent[Updated] seq=11 | Power = 100.0 kW
+[CSMS-v201] ATK-201-OVERLOAD-001 | TransactionEvent[Updated] seq=21 | Power = 200.0 kW
+[CSMS-v201] ATK-201-OVERLOAD-001 | TransactionEvent[Updated] seq=31 | Power = 300.0 kW
+
+# pgtwin grid response — byte-identical to the 1.6 Attack 7 (grid reads a float):
+[PGTwin] iter= 401 | EV=  100.0 kW | Load4(Bus44) vm_pu=0.9418 | total_load=1390 kW
+[PGTwin] iter= 855 | EV=  200.0 kW | Load4(Bus44) vm_pu=0.9093 | total_load=1490 kW
+[PGTwin] iter=1260 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW
+```
+
+The grid staircase (0.9418 → 0.9093 → 0.8694 pu) is the same as Attack 7 — confirming that the protocol version changes the message envelope, not the physical outcome.
+
+### Follow logs
+
+```bash
+docker logs -f csms-v201          # 2.0.1 CSMS — logs every TransactionEvent power
+docker logs -f atk-fdi-v201       # FDI attack terminal (real vs reported)
+docker logs -f atk-overload-v201  # overload attack terminal
+docker logs -f pgtwin             # grid response (overload profile only)
+```
+
+> **Deferred:** the TLS / mutual-TLS / signed-firmware **mitigation track** — which would demonstrate the attacks 2.0.1 *prevents* (MITM 3a/3b/6, firmware 5) being blocked — is not yet built. Ask if you want it.
 
 ---
 

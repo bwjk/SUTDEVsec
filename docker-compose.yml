@@ -20,6 +20,11 @@
 #   docker compose --profile overload-grid  up   # Attack 7 — Single EVSE Grid Overload + PGTwin intro
 #   docker compose --profile load-grid      up   # Attack 8 — Coordinated Load Altering + PGTwin grid
 #   docker compose --profile spoof-grid     up   # Attack 9 — Duration Spoofing + PGTwin grid
+#
+#   ── OCPP 2.0.1 track (separate CSMS on port 9100, plaintext / Profile-1 equivalent) ──
+#   docker compose --profile v201-normal        up   # 2.0.1 CSMS + legitimate 2.0.1 EVSE (baseline)
+#   docker compose --profile v201-fdi           up   # 2.0.1 False Data Injection (survives 2.0.1)
+#   docker compose --profile v201-overload-grid up   # 2.0.1 Single EVSE Overload + PGTwin grid
 
 networks:
   operator-net:
@@ -262,7 +267,7 @@ services:
     networks:
       operator-net:
         ipv4_address: 172.19.0.70
-    profiles: [overload-grid, load-grid, spoof-grid]
+    profiles: [overload-grid, load-grid, spoof-grid, v201-overload-grid]
 
   # ── Attack 7 · Single EVSE Grid Overload + PGTwin ──────────────────────────
   # Threat model: single rogue EVSE on public-net reports inflated MeterValues.
@@ -346,6 +351,91 @@ services:
     depends_on:
       - atk-spoof-grid
     profiles: [spoof-grid]
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # OCPP 2.0.1 TRACK  (separate CSMS on port 9100)
+  #
+  # Plaintext ws:// / Profile-1 equivalent — deliberately NOT TLS. This track
+  # isolates ONE variable: the message model (TransactionEvent vs 1.6's
+  # StartTransaction/MeterValues/StopTransaction). It demonstrates that the
+  # data-integrity attack class (FDI, overload) survives the 1.6 → 2.0.1
+  # migration. MITM/firmware are excluded — they are defeated by the security
+  # profile (TLS/signing), not the protocol version (a TLS track is deferred).
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── OCPP 2.0.1 CSMS ─────────────────────────────────────────────────────────
+  # Dual-homed like the 1.6 CSMS; listens on 9100.
+
+  csms-v201:
+    build: .
+    container_name: csms-v201
+    hostname: csms-v201
+    command: python v201/core/csms_server_v201.py
+    environment:
+      CSMS_PORT: 9100
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.100
+      public-net:
+        ipv4_address: 172.20.0.100
+    ports:
+      - "9100:9100"
+    profiles: [v201-normal, v201-fdi, v201-overload-grid]
+
+  # ── 2.0.1 legitimate EVSE (baseline) ────────────────────────────────────────
+
+  evse-v201:
+    build: .
+    container_name: evse-v201
+    hostname: evse-v201
+    command: sh -c "sleep 3 && python v201/core/evse_client_v201.py --url ws://csms-v201:9100 --duration 30"
+    environment:
+      CSMS_URL: ws://csms-v201:9100
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.101
+    depends_on:
+      - csms-v201
+    profiles: [v201-normal]
+
+  # ── 2.0.1 Attack · False Data Injection ─────────────────────────────────────
+  # Threat model: compromised-but-authenticated charger (insider) on operator-net.
+
+  atk-fdi-v201:
+    build: .
+    container_name: atk-fdi-v201
+    hostname: atk-fdi-v201
+    command: sh -c "sleep 3 && python v201/attacks/attack_fdi_v201.py"
+    environment:
+      CSMS_URL: ws://csms-v201:9100
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.102
+    depends_on:
+      - csms-v201
+    profiles: [v201-fdi]
+
+  # ── 2.0.1 Attack · Single EVSE Grid Overload + PGTwin ───────────────────────
+  # Threat model: single rogue EVSE on public-net. Reuses the pgtwin shared
+  # volume — grid impact is identical to the 1.6 version (grid reads a float).
+
+  atk-overload-v201:
+    build: .
+    container_name: atk-overload-v201
+    hostname: atk-overload-v201
+    command: sh -c "sleep 3 && python v201/attacks/attack_overload_v201.py"
+    environment:
+      CSMS_URL: ws://csms-v201:9100
+      EV_LOAD_FILE: /shared/ev_load_kw.txt
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.101
+    depends_on:
+      - csms-v201
+      - pgtwin
+    profiles: [v201-overload-grid]
 
 volumes:
   pgtwin-shared:
