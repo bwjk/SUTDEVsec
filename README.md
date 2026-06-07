@@ -1086,14 +1086,15 @@ This attack is intentionally simpler than the botnet attacks that follow. Its ro
   (single EVSE, inflated kW)        (Docker volume)             (pandapower runpp)
 ```
 
-| Step | Reported load | Bus 44 vm_pu | Total load |
-|------|--------------|-------------|------------|
-| 0 — Baseline | 0 kW | **0.9689** | 1290 kW |
-| 1 — Nominal | 11 kW | **0.9662** | 1301 kW |
-| 2 — 2× over-report | 22 kW | **0.9633** | 1312 kW |
-| 3 — 4× over-report | 44 kW | **0.9575** | 1334 kW |
-| 4 — 6× over-report | 66 kW | **0.9515** | 1356 kW |
-| 5 — Cleanup | 0 kW | **0.9689** | 1290 kW |
+| Step | Reported load | Bus 44 vm_pu | Actual voltage | Total load |
+|------|--------------|-------------|----------------|------------|
+| 0 — Baseline | 0 kW | **0.9689** | 387.6 V | 1290 kW |
+| 1 — 9× over-report | 100 kW | **0.9418** | 376.7 V | 1390 kW |
+| 2 — 18× over-report | 200 kW | **0.9093** | 363.7 V | 1490 kW |
+| 3 — 27× over-report | 300 kW | **0.8694** | 347.8 V | 1590 kW |
+| 4 — Cleanup | 0 kW | **0.9689** | 387.6 V | 1290 kW |
+
+Key thresholds crossed: IEC 0.95 pu lower limit at ~72 kW (between steps 0 and 1); critical 0.90 pu protection threshold between steps 1 and 2; 300 kW drives Bus 44 to 0.87 pu — 13% below nominal, well into under-voltage relay territory.
 
 ```bash
 docker compose --profile overload-grid up --build --force-recreate
@@ -1102,23 +1103,21 @@ docker compose --profile overload-grid up --build --force-recreate
 **Expected output — pgtwin container (key evidence: monotonic vm_pu sag per step):**
 ```
 [PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).
-[PGTwin] iter=   1 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← baseline
+[PGTwin] iter=   1 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← baseline (387.6 V)
 ...
-[PGTwin] iter= 427 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW  ← step 1
+[PGTwin] iter= 427 | EV=  100.0 kW | Load4(Bus44) vm_pu=0.9418 | total_load=1390 kW  ← step 1 (below IEC 0.95)
 ...
-[PGTwin] iter= 866 | EV=   22.0 kW | Load4(Bus44) vm_pu=0.9633 | total_load=1312 kW  ← step 2
+[PGTwin] iter= 884 | EV=  200.0 kW | Load4(Bus44) vm_pu=0.9093 | total_load=1490 kW  ← step 2 (relay risk)
 ...
-[PGTwin] iter=1301 | EV=   44.0 kW | Load4(Bus44) vm_pu=0.9575 | total_load=1334 kW  ← step 3
+[PGTwin] iter=1295 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW  ← step 3 (−13% nominal)
 ...
-[PGTwin] iter=1772 | EV=   66.0 kW | Load4(Bus44) vm_pu=0.9515 | total_load=1356 kW  ← step 4
-...
-[PGTwin] iter=2723 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← recovery
+[PGTwin] iter=1700 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← recovery
 ```
 
 **Expected output — atk-overload-grid container:**
 ```
   CSMS           : ws://csms:9000
-  Load steps     : [0.0, 11.0, 22.0, 44.0, 66.0, 0.0] kW
+  Load steps     : [0.0, 100.0, 200.0, 300.0, 0.0] kW
   Step duration  : 20s  |  MV interval: 2s
   Grid target    : Load4 Bus 44 (DS4, 0.4 kV, small industry)
 
@@ -1127,31 +1126,27 @@ docker compose --profile overload-grid up --build --force-recreate
   BASELINE — no EV load
 [GRD 09:10:03] Step 0 |   0.0 kW → ev_load_kw.txt | tick  1
 
-  OVERLOAD STEP 1 — 11 kW reported
-[GRD 09:10:23] Step 1 |  11.0 kW → ev_load_kw.txt | tick  1
+  OVERLOAD STEP 1 — 100 kW reported
+[GRD 09:10:23] Step 1 | 100.0 kW → ev_load_kw.txt | tick  1
 
-  OVERLOAD STEP 2 — 22 kW reported
-[GRD 09:10:43] Step 2 |  22.0 kW → ev_load_kw.txt | tick  1
+  OVERLOAD STEP 2 — 200 kW reported
+[GRD 09:10:43] Step 2 | 200.0 kW → ev_load_kw.txt | tick  1
 
-  OVERLOAD STEP 3 — 44 kW reported
-[GRD 09:11:03] Step 3 |  44.0 kW → ev_load_kw.txt | tick  1
-
-  OVERLOAD STEP 4 — 66 kW reported
-[GRD 09:11:23] Step 4 |  66.0 kW → ev_load_kw.txt | tick  1
+  OVERLOAD STEP 3 — 300 kW reported
+[GRD 09:11:03] Step 3 | 300.0 kW → ev_load_kw.txt | tick  1
 
   CLEANUP — load cleared, bus recovers
-[GRD 09:11:43] Step 5 |   0.0 kW → ev_load_kw.txt | tick  1
+[GRD 09:11:23] Step 4 |   0.0 kW → ev_load_kw.txt | tick  1
 
   ATTACK 7 COMPLETE
 
   Grid evidence (read SimOutputBus.csv from shared volume):
   - Column vm_pu45: Bus 44 voltage — decreases with each step
-  - Expected:  0 kW → 0.9689 pu
-               11 kW → 0.9662 pu
-               22 kW → 0.9633 pu
-               44 kW → 0.9575 pu
-               66 kW → 0.9515 pu
-                0 kW → 0.9689 pu  (recovery)
+  - Verified:    0 kW → 0.9689 pu  (387.6 V, baseline)
+               100 kW → 0.9418 pu  (376.7 V — below IEC 0.95 limit)
+               200 kW → 0.9093 pu  (363.7 V — protection relay risk)
+               300 kW → 0.8694 pu  (347.8 V — 13% below nominal)
+                 0 kW → 0.9689 pu  (recovery)
 
   Thesis evidence checklist:
   [x] Single rogue EVSE: no authentication, any ID accepted

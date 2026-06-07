@@ -22,9 +22,9 @@ Its purpose is to:
 ATTACK STEPS
 ------------
   Step 0 —   0 kW : no EV, pure baseline           → vm_pu = 0.9689
-  Step 1 — 100 kW : 9× Level-2 AC rating          → vm_pu ≈ 0.943  (below IEC 0.95 limit)
-  Step 2 — 200 kW : 18× rating, severe over-report → vm_pu ≈ 0.916  (protection relay risk)
-  Step 3 — 300 kW : 27× rating, near collapse      → vm_pu ≈ 0.889  (critical under-voltage)
+  Step 1 — 100 kW : 9× Level-2 AC rating           → vm_pu = 0.9418  (below IEC 0.95 limit)
+  Step 2 — 200 kW : 18× rating, severe over-report → vm_pu = 0.9093  (protection relay risk)
+  Step 3 — 300 kW : 27× rating, near collapse      → vm_pu = 0.8694  (−13% below nominal)
   Step 4 —   0 kW : cleanup, bus recovers          → vm_pu = 0.9689
 
   Key thresholds crossed:
@@ -203,10 +203,10 @@ async def main():
             print()
             print(f"  {YELLOW}Grid evidence (read SimOutputBus.csv from shared volume):{RESET}")
             print(f"  - Column vm_pu45: Bus 44 voltage — decreases with each step")
-            print(f"  - Expected:    0 kW → 0.9689 pu  (baseline)")
-            print(f"               100 kW → ~0.943 pu  (below IEC 0.95 limit)")
-            print(f"               200 kW → ~0.916 pu  (protection relay risk)")
-            print(f"               300 kW → ~0.889 pu  (critical under-voltage)")
+            print(f"  - Verified:    0 kW → 0.9689 pu  (baseline, 387.6 V)")
+            print(f"               100 kW → 0.9418 pu  (376.7 V — below IEC 0.95 limit)")
+            print(f"               200 kW → 0.9093 pu  (363.7 V — protection relay risk)")
+            print(f"               300 kW → 0.8694 pu  (347.8 V — 13% below nominal)")
             print(f"                 0 kW → 0.9689 pu  (recovery)")
             print()
             print(f"  {YELLOW}Thesis evidence checklist:{RESET}")
