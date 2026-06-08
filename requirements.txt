@@ -4,3 +4,4 @@ pandapower==3.4.0
 numpy==2.2.0
 matplotlib==3.10.0
 plotly==6.7.0
+cryptography==46.0.7

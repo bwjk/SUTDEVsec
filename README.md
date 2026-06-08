@@ -46,13 +46,20 @@ SUTDEVsec/
 │   ├── attack_load_grid.py             # Attack 8:  Coordinated load altering + PGTwin grid
 │   ├── attack_spoof_grid.py            # Attack 9:  Duration spoofing + PGTwin grid
 │   └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
-└── v201/                           # ── OCPP 2.0.1 track (separate CSMS, port 9100) ──
-    ├── core/
-    │   ├── csms_server_v201.py         # OCPP 2.0.1 CSMS (plaintext / Profile-1 equiv.)
+└── v201/                           # ── OCPP 2.0.1 tracks ──
+    ├── core/                           # SURVIVAL track (plaintext / Profile-1, port 9100)
+    │   ├── csms_server_v201.py         # OCPP 2.0.1 CSMS (plaintext)
     │   └── evse_client_v201.py         # Legitimate 2.0.1 EVSE (baseline)
-    └── attacks/
-        ├── attack_fdi_v201.py          # 2.0.1 False Data Injection (survives 2.0.1)
-        └── attack_overload_v201.py     # 2.0.1 Single EVSE overload + PGTwin grid
+    ├── attacks/                        # attacks that SURVIVE 2.0.1
+    │   ├── attack_fdi_v201.py          # 2.0.1 False Data Injection (survives)
+    │   └── attack_overload_v201.py     # 2.0.1 Single EVSE overload + PGTwin grid
+    └── secure/                         # PREVENTION track (Profile 3 mutual-TLS, port 9101)
+        ├── gen_certs.py                # PKI: CA, server/client certs, firmware-signing key
+        ├── csms_secure_v201.py         # wss:// mutual-TLS CSMS
+        ├── evse_secure_v201.py         # TLS EVSE + firmware signature verification
+        └── attacks/
+            ├── attack_mitm_secure.py       # MITM (3a/3b/6) blocked by TLS
+            └── attack_firmware_secure.py   # firmware RCE (5) blocked by signed firmware
 ```
 
 ---
@@ -1353,9 +1360,22 @@ python attacks/a6breakers.py
 
 ---
 
-## OCPP 2.0.1 Attack Track
+## OCPP 2.0.1 Tracks
 
-A separate, self-contained track that re-runs the **data-integrity attacks** against an OCPP **2.0.1** CSMS. It is independent of Attacks 1–9 (those remain OCPP 1.6) and lives entirely under `v201/`.
+A self-contained study of OCPP **2.0.1**, independent of Attacks 1–9 (those remain OCPP 1.6) and living entirely under `v201/`. It has **two complementary halves**, which together answer "what does migrating to 2.0.1 actually change?":
+
+| Track | Folder | Profile | Shows |
+|-------|--------|---------|-------|
+| **1 — Survival** | `v201/core`, `v201/attacks` | plaintext (Profile 1) | Data-integrity attacks (FDI, overload) **still work** — message model changes, outcome doesn't |
+| **2 — Prevention** | `v201/secure` | mutual-TLS (Profile 3) + signed firmware | MITM (3a/3b/6) and firmware RCE (5) are **blocked** — shown failing |
+
+The crucial distinction running through both: **prevention comes from the Security Profile (TLS, mutual TLS, signed firmware), not the protocol version.** Track 1 is plaintext on purpose (to isolate the message model); Track 2 turns on the security controls (to show what blocks the attacks). See `OCPP_2.0.1_Compatibility_Evaluation.docx` for the full prevented-vs-survives analysis.
+
+---
+
+## OCPP 2.0.1 — Track 1: Survival (plaintext)
+
+A track that re-runs the **data-integrity attacks** against a plaintext OCPP **2.0.1** CSMS.
 
 ### Why this track exists, and what it deliberately is not
 
@@ -1371,10 +1391,10 @@ The comparison is therefore **1.6-plaintext vs 2.0.1-plaintext**. The only thing
 |-----------|------------------|--------|
 | 2 — False Data Injection | ✅ `attack_fdi_v201.py` | Authenticated-insider data lie; no plausibility check in 2.0.1 |
 | 7 — Single EVSE Overload | ✅ `attack_overload_v201.py` | Same data-integrity class; drives PGTwin via shared volume |
-| 3a / 3b / 6 — MITM family | ❌ excluded | Defeated by **TLS** (the security profile), not the protocol version |
-| 5 — Firmware RCE | ❌ excluded | Defeated by **signed firmware** (the security profile), not the version |
+| 3a / 3b / 6 — MITM family | → Track 2 | Defeated by **TLS** (the security profile), not the protocol version |
+| 5 — Firmware RCE | → Track 2 | Defeated by **signed firmware** (the security profile), not the version |
 
-MITM and firmware are excluded **because** 2.0.1 prevents them — but only via TLS/signing, which is a *security-profile* property, not a *protocol-version* one. Demonstrating those mitigations requires a TLS/mutual-TLS track, which is **deferred**.
+MITM and firmware are not in *this* track **because** 2.0.1 prevents them — but only via TLS/signing, which is a *security-profile* property, not a *protocol-version* one. They are demonstrated being **blocked** in Track 2 (Prevention) below.
 
 ### Architecture
 
@@ -1433,7 +1453,7 @@ The 2.0.1 re-implementation of Attack 7. A single rogue charger reports inflated
 
 The grid staircase (0.9418 → 0.9093 → 0.8694 pu) is the same as Attack 7 — confirming that the protocol version changes the message envelope, not the physical outcome.
 
-### Follow logs
+### Follow logs (Track 1)
 
 ```bash
 docker logs -f csms-v201          # 2.0.1 CSMS — logs every TransactionEvent power
@@ -1442,7 +1462,89 @@ docker logs -f atk-overload-v201  # overload attack terminal
 docker logs -f pgtwin             # grid response (overload profile only)
 ```
 
-> **Deferred:** the TLS / mutual-TLS / signed-firmware **mitigation track** — which would demonstrate the attacks 2.0.1 *prevents* (MITM 3a/3b/6, firmware 5) being blocked — is not yet built. Ask if you want it.
+---
+
+## OCPP 2.0.1 — Track 2: Prevention (Security Profile 3 + signed firmware)
+
+The complementary half: the attacks 2.0.1's **security profile** blocks, shown **failing**. Lives under `v201/secure/`, runs on **wss:// port 9101** with **mutual TLS** (Profile 3) and **signed firmware**.
+
+### Calibration — what these demos prove (and what they don't)
+
+The block is achieved **by the security profile** (TLS + certificate validation + firmware signing), **not by the OCPP version number**. A plaintext 2.0.1 CSMS is exactly as exposed as a plaintext 1.6 one (that is Track 1). The honest, defensible claim is the **side-by-side**:
+
+> *Same attack — succeeds on the plaintext track, blocked under Security Profile 3.*
+
+Do **not** read these as "OCPP 2.0.1 prevents MITM." Read them as "under correctly-deployed Profile 3 with signed firmware, these attacks are prevented."
+
+### PKI
+
+`gen_certs.py` builds the trust chain, baked into the image at build time (`/certs`) so every container shares one CA: root CA, server cert (SAN `csms-secure-v201`), legitimate client cert (mutual TLS), and a manufacturer firmware-signing keypair. Attacker containers deliberately do **not** use these CA-signed materials — a real attacker would not possess them — so the demos stay faithful (the MITM proxy self-signs; the malicious firmware is signed by an attacker key).
+
+### Run scenarios
+
+```bash
+# Secure baseline — mutual-TLS CSMS + EVSE (handshake succeeds, honest traffic)
+docker compose --profile v201-secure-normal up --build
+
+# MITM (Attacks 3a/3b/6) blocked by TLS certificate validation
+docker compose --profile v201-secure-mitm up --build
+
+# Firmware RCE (Attack 5) blocked by signed-firmware verification
+docker compose --profile v201-secure-firmware up --build
+```
+
+### Demo A — MITM blocked by TLS (Attacks 3a / 3b / 6)
+
+A proxy attempts the same interposition as the 1.6 MITM attacks, against a Profile-3 deployment. It can only present a **self-signed** certificate; the EVSE validates the server cert against the trust anchor and refuses.
+
+**Verified — both directions blocked:**
+```
+# EVSE (victim) terminal — the decisive evidence:
+  BLOCKED — server certificate verification FAILED
+  self-signed certificate
+  The EVSE refused the connection — no OCPP frame sent.
+  Attack prevented (OCPP 2.0.1 Security Profile 2/3, TLS).
+
+# MITM proxy (attacker) terminal:
+[MITM] upstream to real CSMS BLOCKED (no valid client certificate)
+[MITM] EVSE will reject our self-signed certificate at the TLS handshake
+```
+
+The man-in-the-middle never establishes a channel, so the MeterValues tampering / StopTransaction injection / StopTransaction-drop that all succeed on the plaintext track are impossible — not because of the OCPP version, but because TLS + cert validation is deployed.
+
+### Demo B — Malicious firmware blocked by signed firmware (Attack 5)
+
+This is the **application-layer** OCPP 2.0.1 control — not just transport encryption. The scenario grants the attacker the *strongest* position: a **compromised but mutual-TLS-authenticated CSMS** pushes an `UpdateFirmware` pointing at a rogue server. The firmware reaches the EVSE. The question is whether it installs.
+
+It does not. The EVSE verifies the firmware signature against the **pinned manufacturer key**; the payload is signed with the attacker's key, so verification fails.
+
+**Verified end-to-end:**
+```
+[CSMS-SEC]  FIRMWARE ATTACK — compromised authenticated CSMS
+[CSMS-SEC]  Pushing UpdateFirmware -> http://atk-firmware-secure:8090/firmware.bin
+[ROGUE-FW] served malicious payload (182 bytes) -> EVSE
+[ROGUE-FW] served signature (256 bytes, attacker key)
+[EVSE-SEC] Downloaded 182 bytes + 256 byte signature
+[EVSE-SEC] Verifying signature against pinned manufacturer key ...
+[CSMS-SEC]  FirmwareStatusNotification: InvalidSignature  <- EVSE REJECTED FIRMWARE
+[EVSE-SEC]  BLOCKED — firmware signature INVALID
+[EVSE-SEC]  EVSE REFUSES TO INSTALL — attack prevented
+```
+
+Transport TLS alone would not stop a *compromised* CSMS — signed firmware does. The EVSE emits the native OCPP 2.0.1 `FirmwareStatusNotification(InvalidSignature)` and refuses to install.
+
+### Why the partial-prevention attacks (1, 4) are NOT demoed here
+
+SaiFlow (1) and Load altering (4) are only *partially* addressed by 2.0.1: mutual TLS blocks an **external** attacker (no client cert), but SaiFlow's duplicate-connection collision-handling flaw **persists in 2.0.1**, and a compromised *authenticated* fleet still alters load (which Track 1 already shows). Demoing them as "prevented" would falsely imply 2.0.1 fixes them. They are covered in the prose evaluation (`OCPP_2.0.1_Compatibility_Evaluation.docx`), not as running prevention code.
+
+### Follow logs (Track 2)
+
+```bash
+docker logs -f evse-secure-mitm     # MITM victim — prints BLOCKED at handshake
+docker logs -f atk-mitm-secure      # MITM proxy — blocked both directions
+docker logs -f evse-secure-fw       # firmware victim — InvalidSignature / REFUSES TO INSTALL
+docker logs -f csms-secure-v201-fw  # compromised CSMS pushing malicious firmware
+```
 
 ---
 

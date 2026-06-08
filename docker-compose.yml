@@ -21,10 +21,17 @@
 #   docker compose --profile load-grid      up   # Attack 8 — Coordinated Load Altering + PGTwin grid
 #   docker compose --profile spoof-grid     up   # Attack 9 — Duration Spoofing + PGTwin grid
 #
-#   ── OCPP 2.0.1 track (separate CSMS on port 9100, plaintext / Profile-1 equivalent) ──
-#   docker compose --profile v201-normal        up   # 2.0.1 CSMS + legitimate 2.0.1 EVSE (baseline)
-#   docker compose --profile v201-fdi           up   # 2.0.1 False Data Injection (survives 2.0.1)
-#   docker compose --profile v201-overload-grid up   # 2.0.1 Single EVSE Overload + PGTwin grid
+#   ── OCPP 2.0.1 SURVIVAL track (plaintext / Profile-1 equivalent, port 9100) ──
+#   Data-integrity attacks survive the 1.6 -> 2.0.1 message-model migration.
+#   docker compose --profile v201-normal         up   # 2.0.1 CSMS + legitimate 2.0.1 EVSE (baseline)
+#   docker compose --profile v201-fdi            up   # 2.0.1 False Data Injection (survives 2.0.1)
+#   docker compose --profile v201-overload-grid  up   # 2.0.1 Single EVSE Overload + PGTwin grid
+#
+#   ── OCPP 2.0.1 PREVENTION track (Security Profile 3 mutual-TLS + signed firmware, port 9101) ──
+#   Attacks that 2.0.1's security profile blocks — shown FAILING.
+#   docker compose --profile v201-secure-normal   up   # secure CSMS + EVSE (mutual-TLS baseline)
+#   docker compose --profile v201-secure-mitm     up   # MITM (3a/3b/6) blocked by TLS cert validation
+#   docker compose --profile v201-secure-firmware up   # firmware RCE (5) blocked by signed firmware
 
 networks:
   operator-net:
@@ -436,6 +443,117 @@ services:
       - csms-v201
       - pgtwin
     profiles: [v201-overload-grid]
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # OCPP 2.0.1 PREVENTION TRACK  (Security Profile 3: mutual TLS + signed firmware)
+  #
+  # Demonstrates the attacks 2.0.1's SECURITY PROFILE blocks — shown failing.
+  # The block is achieved by TLS + cert validation + firmware signing (the
+  # profile), NOT by the OCPP version number. Honest claim: "under Profile 3,
+  # correctly deployed, these attacks are prevented" — side-by-side with the
+  # plaintext track where the same attacks succeed.
+  #
+  # PKI is baked into the image (/certs) by gen_certs.py at build time.
+  # Secure CSMS listens on wss:// 9101 and requires a valid client certificate.
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # ── Secure CSMS (legit) — used by the normal + MITM profiles ────────────────
+  csms-secure-v201:
+    build: .
+    container_name: csms-secure-v201
+    hostname: csms-secure-v201
+    command: python v201/secure/csms_secure_v201.py
+    environment:
+      CSMS_PORT: 9101
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.110
+        aliases: [csms-secure-v201]
+    ports:
+      - "9101:9101"
+    profiles: [v201-secure-normal, v201-secure-mitm]
+
+  # ── Secure CSMS (compromised) — firmware profile; same network alias ────────
+  csms-secure-v201-fw:
+    build: .
+    container_name: csms-secure-v201-fw
+    hostname: csms-secure-v201
+    command: python v201/secure/csms_secure_v201.py
+    environment:
+      CSMS_PORT: 9101
+      FIRMWARE_ATTACK: "1"
+      ROGUE_FW_URL: http://atk-firmware-secure:8090/firmware.bin
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.111
+        aliases: [csms-secure-v201]
+    depends_on:
+      - atk-firmware-secure
+    profiles: [v201-secure-firmware]
+
+  # ── Secure EVSE — baseline (mutual-TLS handshake succeeds) ───────────────────
+  evse-secure-v201:
+    build: .
+    container_name: evse-secure-v201
+    hostname: evse-secure-v201
+    command: sh -c "sleep 3 && python v201/secure/evse_secure_v201.py --url wss://csms-secure-v201:9101 --duration 25"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.112
+    depends_on:
+      - csms-secure-v201
+    profiles: [v201-secure-normal]
+
+  # ── MITM attack (3a/3b/6) — blocked by TLS cert validation ──────────────────
+  atk-mitm-secure:
+    build: .
+    container_name: atk-mitm-secure
+    hostname: atk-mitm-secure
+    command: sh -c "sleep 2 && python v201/secure/attacks/attack_mitm_secure.py"
+    environment:
+      PROXY_PORT: 9101
+      REAL_CSMS: wss://csms-secure-v201:9101
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.115
+    depends_on:
+      - csms-secure-v201
+    profiles: [v201-secure-mitm]
+
+  evse-secure-mitm:
+    build: .
+    container_name: evse-secure-mitm
+    hostname: evse-secure-mitm
+    command: sh -c "sleep 5 && python v201/secure/evse_secure_v201.py --url wss://atk-mitm-secure:9101 --duration 15"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.113
+    depends_on:
+      - atk-mitm-secure
+    profiles: [v201-secure-mitm]
+
+  # ── Firmware attack (5) — blocked by signed-firmware verification ───────────
+  atk-firmware-secure:
+    build: .
+    container_name: atk-firmware-secure
+    hostname: atk-firmware-secure
+    command: python v201/secure/attacks/attack_firmware_secure.py
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.116
+    profiles: [v201-secure-firmware]
+
+  evse-secure-fw:
+    build: .
+    container_name: evse-secure-fw
+    hostname: evse-secure-fw
+    command: sh -c "sleep 5 && python v201/secure/evse_secure_v201.py --url wss://csms-secure-v201:9101 --duration 25"
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.114
+    depends_on:
+      - csms-secure-v201-fw
+    profiles: [v201-secure-firmware]
 
 volumes:
   pgtwin-shared:
