@@ -1170,6 +1170,24 @@ docker compose --profile overload-grid up --build --force-recreate
   [x] Full recovery after load cleared (confirms coupling)
 ```
 
+**Real-world grid impact — what actually happens vs. what the operator sees**
+
+This is fundamentally a **telemetry / state-estimation integrity attack, not a physical brown-out.** A single charger sitting idle and reporting 300 kW draws *no real current* — nothing changes on the physical feeder. The vm_pu figures above are not measured terminal voltages; they are what the operator's PGTwin (a digital-twin / state-estimation model fed by OCPP telemetry) **computes from the forged input**. They represent what the operator would *believe* the grid is doing.
+
+The real harm is therefore downstream of that false belief:
+
+- **Corrupted situational awareness.** The control room's model shows Bus 44 collapsing to 0.87 pu while the feeder is actually healthy.
+- **Wrong automated / operator action.** Any control logic built on that telemetry can react to a phantom — unnecessary load-shedding, curtailment of legitimate customers, or reactive-power dispatch. Inverted, falsified "healthy" readings could *mask* a genuine fault.
+- **Single point of trust.** One unauthenticated unit is enough to move the operator's entire picture of a substation, because OCPP 1.6 applies no integrity check to MeterValues.
+
+*If* that load were physically real (it is not, for one Level-2 unit — that is the meaning of the "27× over-report" label), the modeled voltages would translate as below. Read this as "what the model says the consequence would be," physically realised only when real load is actually present (see Attack 8):
+
+| Modeled Bus 44 voltage | EN 50160 / IEC 60038 (400 V ±10 %) | Physical meaning *if the load were real* |
+|---|---|---|
+| 0.95 pu / 380 V | undervoltage onset | lights dim, sensitive electronics marginal |
+| 0.90 pu / 360 V | at the lower limit | protection may begin to operate |
+| 0.87 pu / 348 V | **outside the limit** | motor stalling, electronics dropout, undervoltage-relay trip → feeder lockout |
+
 **Root cause:** No CP authentication; MeterValues are unsigned and unverified in OCPP 1.6; CSMS has no cross-check against physical metering data.  
 **Mitigation:** OCPP 2.0.1 operator-signed `SetChargingProfile` per CP; CSMS plausibility check against rated connector capacity; smart meter cross-check.
 
@@ -1252,6 +1270,17 @@ docker compose --profile load-grid up --build --force-recreate
   [x] Oscillate:   repeated grid swings — relay wear risk
   [x] Grid impact visible in Dr. Biswas's ZSGplussync topology
 ```
+
+**Real-world grid impact — the one attack with genuine physical potential**
+
+Attack 8 is the only attack in this set that can move *real* power. If the botnet is actually switching real chargers on and off — a **load-altering / "MadIoT"-style attack** — rather than merely lying about telemetry, then 11 kW per charger is a **physically plausible** real load (a Level-2 AC charger genuinely draws that). Coordinated switching therefore produces a *real* demand swing, not just a modeled one.
+
+Two consequences are physically realisable:
+
+- **Coordinated surge / drop** — a synchronised step in real demand. At 55 kW (5 chargers) this is a **lab-scale demonstrator**; a feeder-level brown-out needs a fleet in the thousands. The *mechanism* scales, the demonstrator does not — do not read "5 chargers sag a substation."
+- **Oscillation** — the toggle phase is a genuine rate-of-change-of-load event. Repeated 0 ↔ 55 kW swings stress on-load tap changers and risk ROCOF / ROCOL protection misoperation and relay wear. This is the more dangerous primitive at scale: synchronised oscillation across a large fleet is what the MadIoT literature shows can destabilise grid *frequency*, independent of the steady-state voltage level.
+
+Voltage interpretation uses the same EN 50160 anchors as Attack 7 — but here, unlike Attack 7, the modeled sag corresponds to a *physically realisable* condition once the fleet is large enough.
 
 **Root cause:** No CP authentication; no operator-signed charging profiles; OCPP 1.6 MeterValues are the sole load signal to the grid model.  
 **Mitigation:** OCPP 2.0.1 `SetChargingProfile` with signed profiles; CSMS concurrent connection rate limiting; grid-side ROCOL (rate-of-change-of-load) protection relays.
@@ -1342,6 +1371,16 @@ docker compose --profile spoof-grid up --build --force-recreate
 [PGTwin] iter= 750 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW
                                                           ↑ Phase 4 cleanup — bus recovers
 ```
+
+**Real-world grid impact — billing & forecast integrity, zero physical effect**
+
+Attack 9 has **no physical grid impact at all.** The EV has physically disconnected, so no current flows regardless of what any model says. It is purely a **data-integrity attack** on everything the operator builds on top of OCPP session state. The harm lies in three records that silently diverge from physical reality:
+
+- **Billing fraud / disputes.** The CSMS books 0.18 kWh of phantom energy against a session that has already ended — a metering-integrity and revenue-assurance problem.
+- **Corrupted demand forecasting & capacity reservation.** The operator's model holds Bus 44 "loaded" for 60 s after the car left, so demand forecasts, capacity reservation, and any settlement derived from session data are wrong. The operator reserves headroom for a load that isn't there (or, inverted, can be made to under-count real load).
+- **State-estimate divergence.** This is the thesis point: "EVSE physically gone" and "grid model still loaded" cannot be reconciled from OCPP 1.6 alone, because there is no session-liveness signal tied to physical charger state.
+
+The 60 s window and 11 kW are demonstrator values; the real attack surface is the **unbounded divergence** between physical reality and the operator's OCPP-derived view, not the specific magnitude.
 
 **Root cause:** `StopTransaction` is unsigned; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
 **Mitigation:** WSS + mutual TLS (prevents MITM interposition); CSMS Heartbeat inactivity timeout; OCPP 2.0.1 signed `StopTransaction`; physical pilot-signal monitoring cross-checked against OCPP session state.
