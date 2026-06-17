@@ -39,6 +39,7 @@ SUTDEVsec/
 │   ├── attack_fdi.py                   # Attack 2:  MeterValues False Data Injection
 │   ├── attack_mitm_session_patched.py  # Attack 3a: MITM proxy — internal (operator-net)
 │   ├── attack_mitm_ext.py              # Attack 3b: MITM proxy — external (public-net)
+│   ├── dns_poison.py                   # Attack 3b-DNS: DNS-redirect interception primitive
 │   ├── attack_load_altering.py         # Attack 4:  Coordinated botnet load altering
 │   ├── attack_firmware.py              # Attack 5:  Malicious firmware update / RCE
 │   ├── attack_duration_spoof.py        # Attack 6:  Duration spoofing (StopTransaction drop)
@@ -308,6 +309,34 @@ Each component runs in its own container on a logically separate network segment
   └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### External MITM via DNS redirection (Attack 3b-DNS)
+
+The rigorous external-MITM variant adds a **poisoned DNS resolver** so the EVSE is redirected by *name resolution*, not by its own configuration. The EVSE dials the real hostname `csms.cpo.sg` in **both** the attack and benign runs — only the DNS answer differs. This supplies the interception primitive the plain `mitm-ext` profile assumed.
+
+```
+  public-net · 172.20.0.0/24
+                                    (1) "csms.cpo.sg ?"
+   ┌────────────────────┐   DNS query ───────────────►   ┌──────────────────────┐
+   │   evse-via-dns      │                                 │     dns-poison        │
+   │   172.20.0.55       │                                 │     172.20.0.5        │
+   │  --url ws://        │  ◄───── (2) "A 172.20.0.33" ─── │     MODE = POISON     │
+   │  csms.cpo.sg:9000   │          FORGED answer          │  (attacker's IP for   │
+   └─────────┬───────────┘                                 │   csms.cpo.sg)        │
+             │                                             └──────────────────────┘
+             │ (3) WebSocket → 172.20.0.33:9000
+             │     EVSE believes host = csms.cpo.sg
+             ▼
+   ┌─────────────────────────┐  (4) relay + tamper   ┌───────────────────────────┐
+   │   atk-mitm-ext-dns       │  ws://csms:9000 ────► │   csms  172.20.0.10        │
+   │   172.20.0.33  :9000     │                       │   records 999 kW (tampered)│
+   │   MITM proxy             │                       └───────────────────────────┘
+   └─────────────────────────┘
+
+  Benign control (profile mitm-ext-dns-safe): identical EVSE command, but
+  dns-honest (172.20.0.6) answers "A 172.20.0.10" → the EVSE reaches the real
+  CSMS directly and it records the untampered 60 kW. Only the DNS answer changed.
+```
+
 ### PGTwin grid integration (Attacks 7, 8, 9)
 
 Attacks 7–9 add a second layer to the topology: a shared Docker volume bridges the OCPP protocol containers to the pandapower grid simulator. The attack container writes a single float (kW) to the volume; pgtwin reads it before every `runpp()` call.
@@ -356,6 +385,7 @@ Attacks 7–9 add a second layer to the topology: a shared Docker volume bridges
 | 2 | False Data Injection | Compromised EVSE (insider) | operator-net | Yes | Supply chain / physical compromise |
 | 3a | MITM — Internal | Compromised network device | operator-net | Yes | ARP poisoning / rogue switch |
 | 3b | MITM — External | External attacker | public-net | No | BGP hijack / DNS poisoning / rogue cloud proxy |
+| 3b-DNS | MITM — External (DNS-redirect) | External attacker | public-net | No | Attacker-controlled DNS (rogue 4G DNS / gateway / DoT downgrade) — interception primitive implemented |
 | 4 | Load Altering | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
 | 5 | Malicious Firmware Update | Rogue / compromised CSMS | operator-net | Yes | DNS poisoning / compromised CSMS platform |
 | 6 | Duration Spoofing | MITM on operator LAN | operator-net | Yes | ARP poisoning / rogue switch |
@@ -388,6 +418,10 @@ docker compose --profile mitm up --build
 
 # Attack 3b — MITM proxy, EXTERNAL  (public-net, BGP/DNS hijack threat model)
 docker compose --profile mitm-ext up --build
+
+# Attack 3b-DNS — EXTERNAL MITM via poisoned DNS  (real interception primitive)
+docker compose --profile mitm-ext-dns up --build --force-recreate
+docker compose --profile mitm-ext-dns-safe up --build --force-recreate   # benign control
 
 # Attack 4 — Coordinated load altering  (external botnet, 10 bots)
 docker compose --profile load up --build
@@ -826,6 +860,61 @@ python core/evse_client4_fixed.py --url ws://127.0.0.1:9002
 
 **Root cause:** No TLS on the WAN path; no certificate pinning; EVSE cannot distinguish real CSMS from a proxy.  
 **Mitigation:** WSS + certificate pinning; mutual TLS; DNS-over-TLS / DNSSEC; OCPP 2.0.1 signed messages.
+
+---
+
+### Attack 3b-DNS — External MITM with a real interception primitive
+
+**Scripts:** `attacks/dns_poison.py` + `attacks/attack_mitm_ext.py`  
+**Profiles:** `mitm-ext-dns` (attack) · `mitm-ext-dns-safe` (benign control)  
+**Network:** public-net — **zero operator-net access**  
+**Initial access:** attacker controls the EVSE's DNS resolution (rogue 4G-SIM DNS, compromised site gateway, DoT/DoH downgrade)
+
+The plain `mitm-ext` profile above has a known weakness: the EVSE is launched with `--url ws://atk-mitm-ext:9002`, i.e. it is *told* to dial the attacker. That assumes the interception rather than demonstrating it. This variant supplies the missing **interception primitive**.
+
+Here the EVSE is configured with the **real CSMS hostname** (`ws://csms.cpo.sg:9000`) and resolves it through a DNS server the attacker controls. In `POISON` mode that resolver returns the attacker's IP (`172.20.0.33`); the EVSE dials the MITM proxy believing it reached the cloud CSMS. The interception is now caused by **name resolution**, not by the victim's own configuration.
+
+**The rigour win — the EVSE config is byte-identical across both runs:**
+
+```
+attack run  (mitm-ext-dns):       --url ws://csms.cpo.sg:9000     # DNS lies → attacker
+benign run  (mitm-ext-dns-safe):  --url ws://csms.cpo.sg:9000     # DNS honest → real CSMS
+```
+
+Only the DNS answer differs. The charger is never reconfigured — proving the attack lives entirely in the network's name lookup.
+
+```bash
+# Attack: poisoned DNS redirects the EVSE through the MITM proxy
+docker compose --profile mitm-ext-dns up --build --force-recreate
+
+# Benign control: same EVSE command, honest DNS, reaches the real CSMS
+docker compose --profile mitm-ext-dns-safe up --build --force-recreate
+```
+
+**Verified end-to-end (June 2026):**
+
+| Evidence | Attack run (`mitm-ext-dns`) | Benign run (`mitm-ext-dns-safe`) |
+|---|---|---|
+| DNS answer for `csms.cpo.sg` | `FORGED ... A -> 172.20.0.33` (attacker) | `honest ... A -> 172.20.0.10` (real CSMS) |
+| EVSE believes it connected to | `csms.cpo.sg` (real hostname) | `csms.cpo.sg` (real hostname) |
+| What the CSMS records | `999.0 kW` (tampered in transit) | `60.0 kW` (untampered) |
+| StopTransaction | forged injection from public-net | none |
+
+**Evidence chain (reviewer-proof):** (1) the EVSE issues a DNS query for `csms.cpo.sg`; (2) the resolver returns a forged A-record pointing at the attacker; (3) the EVSE opens its WebSocket to the attacker IP while still believing the host is `csms.cpo.sg`; (4) the proxy relays on to the real CSMS while tampering. All four are visible in `dns-poison`, `evse-via-dns`, and `atk-mitm-ext-dns` container logs (and a port-53 / port-9000 pcap).
+
+**Honest scoping:** this does not remove the trust assumption — it **relocates** it from the indefensible *"the victim's config points at the attacker"* to the defensible *"the attacker controls the EVSE's name resolution."* The poisoning act itself (gaining control of the resolver) is assumed, matching the documented 4G-DNS / gateway-compromise vectors; everything downstream is demonstrated.
+
+**Where this sits — external MITM is a 2×2 (interception × transport):**
+
+| | **ws://** (Profile 1) | **wss:// no pinning** | **wss:// pinned / mutual-TLS** |
+|---|---|---|---|
+| **DNS redirect** | ✅ full MITM — **this profile** | ⚠️ needs a cert-trust failure (rogue cert / downgrade) | ❌ blocked |
+| **BGP hijack** | ✅ (future work) | ⚠️ | ❌ blocked — see `v201/secure` |
+
+The plaintext-`ws://` corner is now demonstrated end-to-end; the mutual-TLS corner is the `v201/secure` prevention track. This frames the interception primitive (the rigour fix) separately from transport security (the related strengthening), and unifies the external-MITM story with the OCPP 2.0.1 work.
+
+**Root cause:** EVSE trusts unauthenticated DNS and an unauthenticated `ws://` endpoint; it cannot bind the hostname to the real CSMS identity.  
+**Mitigation:** DNS-over-TLS / DNSSEC (stops the forged record); WSS + certificate pinning or mutual-TLS (the connection fails even if DNS is poisoned, because the attacker holds no valid CSMS certificate — demonstrated in `v201/secure`).
 
 ---
 

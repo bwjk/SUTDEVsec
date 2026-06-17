@@ -172,6 +172,90 @@ services:
       - atk-mitm-ext
     profiles: [mitm-ext]
 
+  # ── Attack 3b-DNS · EXTERNAL MITM with a real interception primitive ───────
+  # The rigorous version of Attack 3b.  The EVSE is configured with the REAL
+  # CSMS hostname (csms.cpo.sg) — NOT the attacker's address.  A poisoned DNS
+  # resolver returns the attacker's IP for that hostname, so the EVSE dials the
+  # MITM proxy believing it reached the cloud CSMS.  The interception is now
+  # caused by name resolution, not by the victim's own config.
+  #
+  #   docker compose --profile mitm-ext-dns      up --build --force-recreate
+  #   docker compose --profile mitm-ext-dns-safe up --build --force-recreate   (benign control)
+
+  dns-poison:
+    build: .
+    container_name: dns-poison
+    hostname: dns-poison
+    command: python attacks/dns_poison.py
+    environment:
+      TARGET_HOST: csms.cpo.sg
+      ANSWER_IP: 172.20.0.33          # attacker MITM proxy
+      MODE: POISON
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.5
+    profiles: [mitm-ext-dns]
+
+  atk-mitm-ext-dns:
+    build: .
+    container_name: atk-mitm-ext-dns
+    hostname: atk-mitm-ext-dns
+    # listens on :9000 so csms.cpo.sg:9000 (the real CSMS port) lands here
+    command: sh -c "sleep 2 && python attacks/attack_mitm_ext.py --csms-url ws://csms:9000 --proxy-port 9000"
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.33
+    depends_on:
+      - csms
+    profiles: [mitm-ext-dns]
+
+  evse-via-dns:
+    build: .
+    container_name: evse-via-dns
+    hostname: evse-via-dns
+    # NOTE: identical to the benign command below — points at the REAL hostname.
+    command: sh -c "sleep 6 && python core/evse_client4_fixed.py --url ws://csms.cpo.sg:9000"
+    dns:
+      - 172.20.0.5                    # poisoned resolver
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.55
+    depends_on:
+      - dns-poison
+      - atk-mitm-ext-dns
+    profiles: [mitm-ext-dns]
+
+  # Benign control: SAME EVSE command, but an honest resolver returns the real
+  # CSMS IP — demonstrating that only the DNS answer changed between runs.
+  dns-honest:
+    build: .
+    container_name: dns-honest
+    hostname: dns-honest
+    command: python attacks/dns_poison.py
+    environment:
+      TARGET_HOST: csms.cpo.sg
+      ANSWER_IP: 172.20.0.10          # real CSMS (public-net)
+      MODE: HONEST
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.6
+    profiles: [mitm-ext-dns-safe]
+
+  evse-via-dns-safe:
+    build: .
+    container_name: evse-via-dns-safe
+    hostname: evse-via-dns-safe
+    command: sh -c "sleep 6 && python core/evse_client4_fixed.py --url ws://csms.cpo.sg:9000"
+    dns:
+      - 172.20.0.6                    # honest resolver
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.56
+    depends_on:
+      - dns-honest
+      - csms
+    profiles: [mitm-ext-dns-safe]
+
   # ── Attack 4 · Coordinated Load Altering ────────────────────────────────────
   # Threat model: external botnet, public-net only, reaches CSMS:9000
 
