@@ -874,6 +874,16 @@ The plain `mitm-ext` profile above has a known weakness: the EVSE is launched wi
 
 Here the EVSE is configured with the **real CSMS hostname** (`ws://csms.cpo.sg:9000`) and resolves it through a DNS server the attacker controls. In `POISON` mode that resolver returns the attacker's IP (`172.20.0.33`); the EVSE dials the MITM proxy believing it reached the cloud CSMS. The interception is now caused by **name resolution**, not by the victim's own configuration.
 
+**Where the attack actually comes from — step by step**
+
+The external attack originates **on the public internet, by subverting the charger's name resolution** — not from the operator's network, and not from the charger's own configuration.
+
+- **Stage 0 — Attacker position.** The attacker is on the public internet only: no presence at the charging site, no foothold on the operator LAN (`operator-net` is unreachable). This is the genuinely *external* tier.
+- **Stage 1 — Gaining control of the charger's DNS (the origin).** Singapore public chargers reach a cloud CSMS over a 4G/LTE SIM or public broadband, resolving a hostname such as `csms.cpo.sg`. The attacker subverts that lookup by one of: a rogue/compromised carrier or MVNO DNS handed to the EVSE via its 4G APN; cache-poisoning the recursive resolver the EVSE uses; a rogue cellular base station / on-path DNS spoofing on the radio link; compromising the site gateway/CPE that serves DNS to the charger; or stripping a DoT/DoH upgrade so plaintext DNS can be forged. **This is the one step EVSecSim *assumes*** (modelled by the attacker-controlled `dns-poison` resolver) rather than exploits — the honest boundary of the claim. Everything after this is demonstrated.
+- **Stage 2 — Redirection.** The EVSE asks for `csms.cpo.sg`; the attacker's resolver answers with the attacker's IP (forged A-record). The EVSE opens its OCPP WebSocket to the attacker while still addressing the real hostname.
+- **Stage 3 — Interposition.** The attacker accepts the connection and opens its own onward connection to the real CSMS, relaying frames transparently. Because OCPP 1.6 is plaintext `ws://` with no server-certificate or identity check, the EVSE cannot tell the proxy from the CSMS.
+- **Stage 4 — Manipulation.** Now in-path, the attacker rewrites and injects OCPP messages (see *Actual impact* below).
+
 **The rigour win — the EVSE config is byte-identical across both runs:**
 
 ```
@@ -901,6 +911,17 @@ docker compose --profile mitm-ext-dns-safe up --build --force-recreate
 | StopTransaction | forged injection from public-net | none |
 
 **Evidence chain (reviewer-proof):** (1) the EVSE issues a DNS query for `csms.cpo.sg`; (2) the resolver returns a forged A-record pointing at the attacker; (3) the EVSE opens its WebSocket to the attacker IP while still believing the host is `csms.cpo.sg`; (4) the proxy relays on to the real CSMS while tampering. All four are visible in `dns-poison`, `evse-via-dns`, and `atk-mitm-ext-dns` container logs (and a port-53 / port-9000 pcap).
+
+**Actual impact of the attack**
+
+The MITM sits on the EVSE→CSMS *reporting* path, so the impact is on the **integrity of what the operator believes**, not on the physics of the charger — the EV charges exactly as it would otherwise. Two effects, both demonstrated in the run:
+
+| In-path action | What the CSMS / operator sees | Real-world impact |
+|---|---|---|
+| MeterValues tampered `60 → 999 kW` | Inflated power/energy for the session | Corrupted billing (over- or under-charge); and where this telemetry feeds a grid model / state estimator (e.g. PGTwin), a **phantom load** that skews the operator's situational picture and any automated decision built on it |
+| Forged `StopTransaction` injected | Session "ended" while the EV keeps charging | Billing closed early → **unmetered / free energy** and revenue loss; session-state desync; the operator's books and grid view diverge from physical reality |
+
+The decisive point: because OCPP 1.6 has **no message authentication**, none of this is visible to the operator from the OCPP stream — the frames are syntactically valid and arrive over an apparently normal session. Reliable detection requires an **external cross-check** (smart meter / AMI, grid SCADA) or, better, preventing the interposition outright (DNSSEC / cert-pinning / mutual-TLS). This is a *data-integrity* attack on the channel, consequential precisely because the CSMS — and the digital twin behind it — trust the channel.
 
 **Honest scoping:** this does not remove the trust assumption — it **relocates** it from the indefensible *"the victim's config points at the attacker"* to the defensible *"the attacker controls the EVSE's name resolution."* The poisoning act itself (gaining control of the resolver) is assumed, matching the documented 4G-DNS / gateway-compromise vectors; everything downstream is demonstrated.
 
