@@ -1,6 +1,6 @@
-# EVSecSim — OCPP 1.6 Security Research Testbed
+# EVSecSim — OCPP 1.6 / 2.0.1 Security Research Testbed with Grid Coupling
 
-A proof-of-concept security research framework demonstrating known attack vectors against EV charging infrastructure over OCPP 1.6. Built for the SUTD thesis project on EV charging cybersecurity.
+A proof-of-concept security research framework demonstrating known attack vectors against EV charging infrastructure over OCPP 1.6, their survival/prevention under OCPP 2.0.1, and their propagation to a coupled pandapower distribution-grid digital twin. Built for the SUTD thesis project on EV charging cybersecurity.
 
 > **For authorized research and educational use only.**
 
