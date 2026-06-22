@@ -389,6 +389,7 @@ Attacks 7–10 add a second layer to the topology: a shared Docker volume bridge
 | 7 | Single EVSE Grid Overload + PGTwin | Single rogue EVSE | public-net | No | Direct WebSocket to exposed CSMS port |
 | 8 | Load Altering + PGTwin | External botnet | public-net | No | Direct WebSocket to exposed CSMS port |
 | 9 | Duration Spoofing + PGTwin | MITM on operator LAN | operator-net | Yes | ARP poisoning / rogue switch |
+| 10 | Coordinated Fleet Overload + PGTwin (MV hub) | External botnet (scaled DC-fast fleet) | public-net | No | Direct WebSocket to exposed CSMS port |
 
 ---
 
