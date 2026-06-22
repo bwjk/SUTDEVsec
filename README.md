@@ -13,7 +13,8 @@ EVSecSim simulates a minimal EV charging ecosystem consisting of:
 - A **CSMS** (Central System / Charge Point Management System) over WebSocket
 - An **EVSE client** (EV Supply Equipment) backed by a live pandapower grid twin
 - A **PGTwin grid simulator** (Dr. Biswas's 7-substation Singapore distribution network, 66 kV → 22 kV → 6.6 kV → 0.4 kV)
-- Nine **attack scripts** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models, including three attacks wired to the real PGTwin grid
+- **Ten numbered attacks (1–10)** demonstrating published OCPP 1.6 vulnerabilities across both internal and external threat models — including **four wired to the real PGTwin grid** (Attacks 7–10) and a DNS-redirection MITM variant (3b-DNS) that supplies a real WAN interception primitive
+- An **OCPP 2.0.1 study** (`v201/`) re-running the data-integrity attacks against a 2.0.1 CSMS (survival track) and showing MITM/firmware attacks blocked under mutual-TLS + signed firmware (prevention track)
 
 The attacks target weaknesses documented by SaiFlow (2023) and Idaho National Laboratory (INL/CON-23-72329, 2023): no transport encryption, no message authentication, no connection deduplication, no charge-point identity verification, and no firmware signature verification.
 
@@ -33,7 +34,7 @@ SUTDEVsec/
 │   └── evse_client4_fixed.py       # Legitimate EVSE client + pandapower grid simulation
 ├── grid/
 │   └── ZSGplussync_docker.py       # PGTwin: 7-substation Singapore grid (Dr. Biswas)
-├── attacks/                        # ── OCPP 1.6 track (Attacks 1–9) ──
+├── attacks/                        # ── OCPP 1.6 track (Attacks 1–10) ──
 │   ├── run_attacks.py                  # Interactive orchestrator (local use)
 │   ├── attack_saiflow_dos_patched.py   # Attack 1:  SaiFlow duplicate-CP DoS
 │   ├── attack_fdi.py                   # Attack 2:  MeterValues False Data Injection
@@ -446,7 +447,7 @@ python attacks/grid_ramp_analysis.py     # LV-vs-MV ramp-to-failure thresholds +
 
 Drop `--build` on repeat runs if no code has changed.
 
-> **Note for Attacks 7, 8 and 9:** Always use `--force-recreate` (or run `docker compose --profile <X> down` first). Docker Compose reuses running containers across sessions; without recreating, the `pgtwin` container may start without its shared volume mount and the OCPP→grid coupling will not work. For Attack 9, do **not** use `--abort-on-container-exit` — the EVSE container exits by design after receiving the forged `StopTransaction` ACK, and the ghost phase must continue for a further 60 seconds after that.
+> **Note for Attacks 7, 8, 9 and 10:** Always use `--force-recreate` (or run `docker compose --profile <X> down` first). Docker Compose reuses running containers across sessions; without recreating, the `pgtwin` / `pgtwin-mv` container may start without its shared volume mount and the OCPP→grid coupling will not work. For Attack 9, do **not** use `--abort-on-container-exit` — the EVSE container exits by design after receiving the forged `StopTransaction` ACK, and the ghost phase must continue for a further 60 seconds after that.
 
 ### Follow logs
 
@@ -476,6 +477,15 @@ docker logs -f pgtwin
 docker logs -f atk-spoof-grid
 docker logs -f evse-via-spoof-grid
 docker logs -f pgtwin
+
+# Attack 10 containers (coordinated fleet overload @ MV hub)
+docker logs -f atk-overload-fleet
+docker logs -f pgtwin-mv
+
+# Attack 3b-DNS containers (DNS-redirect external MITM)
+docker logs -f dns-poison
+docker logs -f atk-mitm-ext-dns
+docker logs -f evse-via-dns
 ```
 
 ### Tear down
@@ -484,16 +494,19 @@ docker logs -f pgtwin
 docker compose --profile <profile> down --remove-orphans
 ```
 
-### Observing grid impact (Attacks 7, 8, 9)
+### Observing grid impact (Attacks 7–10)
 
 Grid attacks produce evidence at three levels: real-time container stdout, persistent CSV files on the shared Docker volume, and the live coupling file itself.
 
 #### Real-time: pgtwin stdout
 
-The most immediate view. Every `runpp()` iteration emits one line:
+The most immediate view. Every `runpp()` iteration emits one line reporting the injection-bus voltage and the worst line loading (a `*** LINE OVERLOAD ***` flag appears at ≥100%):
 
 ```
-[PGTwin] iter=1330 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW
+# Attack 7 (Bus 44, 300 kW):
+[PGTwin] iter=1330 | EV=   300.0 kW | Bus44 vm_pu=0.8694 | max_line_loading=141.4% | total_load=1590 kW  *** LINE OVERLOAD ***
+# Attack 10 (pgtwin-mv, Bus 21, 6 MW fleet):
+[PGTwin] iter= 982 | EV=  6000.0 kW | Bus21 vm_pu=0.9864 | max_line_loading=106.9% | total_load=7290 kW  *** LINE OVERLOAD ***
 ```
 
 Watch it live while an attack profile is running:
@@ -502,7 +515,7 @@ Watch it live while an attack profile is running:
 docker logs -f pgtwin
 ```
 
-You see vm_pu change in real time as each attack phase fires — stepping down across overload steps (Attack 7), surging and recovering during botnet phases (Attack 8), or holding depressed for 60 s after the EVSE exits (Attack 9).
+You see vm_pu change in real time as each attack phase fires — stepping down across overload steps (Attack 7), surging and recovering during botnet phases (Attack 8), holding depressed for 60 s after the EVSE exits (Attack 9), or — on `pgtwin-mv` — the MV feeder crossing 100% loading while voltage barely moves (Attack 10).
 
 #### Grid CSV files (shared volume)
 
@@ -589,12 +602,14 @@ Output files are written to `captures\attack_<label>.pcap`. Open in Wireshark an
 | FDI | `csms` | `websocket && ip.dst == 172.19.0.10` |
 | MITM internal | `csms` | `websocket && (tcp.port == 9000 or tcp.port == 9001)` |
 | MITM external | `csms` | `websocket && (tcp.port == 9000 or tcp.port == 9002)` |
+| MITM external (DNS-redirect) | `dns-poison` | `dns or websocket` (forged A-record on :53, then WS to attacker :9000) |
 | SaiFlow / Load | `csms` | `websocket && ip.dst == 172.20.0.10` |
 | Firmware | `atk-firmware` | `websocket \|\| http` |
 | Duration spoofing | `atk-duration-spoof` | `websocket && (tcp.port == 9000 or tcp.port == 9003)` |
 | EVSE grid overload + PGTwin | `atk-overload-grid` | `websocket && ip.dst == 172.20.0.10` |
 | Load altering + PGTwin | `atk-load-grid` | `websocket && ip.dst == 172.20.0.10` |
 | Duration spoofing + PGTwin | `atk-spoof-grid` | `websocket && (tcp.port == 9000 or tcp.port == 9004)` |
+| Coordinated fleet overload + PGTwin (MV) | `atk-overload-fleet` | `websocket && ip.dst == 172.20.0.10` (grid evidence: `attack10_ramp_sweep.csv` / `figureE`) |
 
 For Attack 5 also inspect the HTTP payload delivery (port 8080 is published to host):
 
@@ -617,6 +632,8 @@ pandapower==3.4.0
 numpy==2.2.0
 matplotlib==3.10.0
 plotly==6.7.0
+cryptography==46.0.7
+dnslib==0.9.26
 ```
 
 ```bash
@@ -1228,16 +1245,16 @@ docker compose --profile overload-grid up --build --force-recreate
 
 **Expected output — pgtwin container (key evidence: monotonic vm_pu sag per step):**
 ```
-[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).
-[PGTwin] iter=   1 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← baseline (387.6 V)
+[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44, 0.4 kV).
+[PGTwin] iter=   1 | EV=    0.0 kW | Bus44 vm_pu=0.9689 | max_line_loading= 53.0% | total_load=1290 kW  ← baseline (387.6 V)
 ...
-[PGTwin] iter= 427 | EV=  100.0 kW | Load4(Bus44) vm_pu=0.9418 | total_load=1390 kW  ← step 1 (below IEC 0.95)
+[PGTwin] iter= 427 | EV=  100.0 kW | Bus44 vm_pu=0.9418 | max_line_loading= 80.1% | total_load=1390 kW  ← step 1 (below IEC 0.95)
 ...
-[PGTwin] iter= 884 | EV=  200.0 kW | Load4(Bus44) vm_pu=0.9093 | total_load=1490 kW  ← step 2 (relay risk)
+[PGTwin] iter= 884 | EV=  200.0 kW | Bus44 vm_pu=0.9093 | max_line_loading=109.2% | total_load=1490 kW  *** LINE OVERLOAD ***  ← step 2 (relay risk + feeder overload)
 ...
-[PGTwin] iter=1295 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW  ← step 3 (−13% nominal)
+[PGTwin] iter=1295 | EV=  300.0 kW | Bus44 vm_pu=0.8694 | max_line_loading=141.4% | total_load=1590 kW  *** LINE OVERLOAD ***  ← step 3 (−13% nominal)
 ...
-[PGTwin] iter=1700 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW  ← recovery
+[PGTwin] iter=1700 | EV=    0.0 kW | Bus44 vm_pu=0.9689 | max_line_loading= 53.0% | total_load=1290 kW  ← recovery
 ```
 
 **Expected output — atk-overload-grid container:**
@@ -1333,16 +1350,16 @@ docker compose --profile load-grid up --build --force-recreate
 
 **Expected output — pgtwin container (key evidence: vm_pu sag on bot connect, recovery on drop):**
 ```
-[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).
-[PGTwin] iter=   1 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
-[PGTwin] iter=   2 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
+[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44, 0.4 kV).
+[PGTwin] iter=   1 | EV=   55.0 kW | Bus44 vm_pu=0.9546 | max_line_loading= 67.7% | total_load=1345 kW
+[PGTwin] iter=   2 | EV=   55.0 kW | Bus44 vm_pu=0.9546 | max_line_loading= 67.7% | total_load=1345 kW
 ...
-[PGTwin] iter=1323 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW   ← DROP phase
+[PGTwin] iter=1323 | EV=    0.0 kW | Bus44 vm_pu=0.9689 | max_line_loading= 53.0% | total_load=1290 kW   ← DROP phase
 ...
-[PGTwin] iter=2109 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW   ← OSCILLATE MAX
-[PGTwin] iter=2110 | EV=   55.0 kW | Load4(Bus44) vm_pu=0.9546 | total_load=1345 kW
-[PGTwin] iter=2111 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW   ← mid-transition
-[PGTwin] iter=2112 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW   ← OSCILLATE ZERO
+[PGTwin] iter=2109 | EV=   55.0 kW | Bus44 vm_pu=0.9546 | max_line_loading= 67.7% | total_load=1345 kW   ← OSCILLATE MAX
+[PGTwin] iter=2110 | EV=   55.0 kW | Bus44 vm_pu=0.9546 | max_line_loading= 67.7% | total_load=1345 kW
+[PGTwin] iter=2111 | EV=   11.0 kW | Bus44 vm_pu=0.9662 | max_line_loading= 55.9% | total_load=1301 kW   ← mid-transition
+[PGTwin] iter=2112 | EV=    0.0 kW | Bus44 vm_pu=0.9689 | max_line_loading= 53.0% | total_load=1290 kW   ← OSCILLATE ZERO
 ```
 
 **Expected output — atk-load-grid container:**
@@ -1475,12 +1492,12 @@ docker compose --profile spoof-grid up --build --force-recreate
 
 **Expected output — pgtwin container (key evidence: vm_pu held at 0.9662 after EVSE gone):**
 ```
-[PGTwin] iter=  46 | EV=   60.0 kW | Load4(Bus44) vm_pu=0.9532 | total_load=1350 kW
-[PGTwin] iter=  47 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW
+[PGTwin] iter=  46 | EV=   60.0 kW | Bus44 vm_pu=0.9532 | max_line_loading= 69.0% | total_load=1350 kW
+[PGTwin] iter=  47 | EV=   11.0 kW | Bus44 vm_pu=0.9662 | max_line_loading= 55.9% | total_load=1301 kW
                                                           ↑ EVSE disconnects here (Phase 2)
-[PGTwin] iter=  48 | EV=   11.0 kW | Load4(Bus44) vm_pu=0.9662 | total_load=1301 kW
+[PGTwin] iter=  48 | EV=   11.0 kW | Bus44 vm_pu=0.9662 | max_line_loading= 55.9% | total_load=1301 kW
 ...  (60 seconds of ghost phase — hundreds of iterations at 0.9662) ...
-[PGTwin] iter= 750 | EV=    0.0 kW | Load4(Bus44) vm_pu=0.9689 | total_load=1290 kW
+[PGTwin] iter= 750 | EV=    0.0 kW | Bus44 vm_pu=0.9689 | max_line_loading= 53.0% | total_load=1290 kW
                                                           ↑ Phase 4 cleanup — bus recovers
 ```
 
@@ -1560,7 +1577,7 @@ python attacks/a6breakers.py
 
 ## OCPP 2.0.1 Tracks
 
-A self-contained study of OCPP **2.0.1**, independent of Attacks 1–9 (those remain OCPP 1.6) and living entirely under `v201/`. It has **two complementary halves**, which together answer "what does migrating to 2.0.1 actually change?":
+A self-contained study of OCPP **2.0.1**, independent of Attacks 1–10 (those remain OCPP 1.6) and living entirely under `v201/`. It has **two complementary halves**, which together answer "what does migrating to 2.0.1 actually change?":
 
 | Track | Folder | Profile | Shows |
 |-------|--------|---------|-------|
@@ -1644,9 +1661,9 @@ The 2.0.1 re-implementation of Attack 7. A single rogue charger reports inflated
 [CSMS-v201] ATK-201-OVERLOAD-001 | TransactionEvent[Updated] seq=31 | Power = 300.0 kW
 
 # pgtwin grid response — byte-identical to the 1.6 Attack 7 (grid reads a float):
-[PGTwin] iter= 401 | EV=  100.0 kW | Load4(Bus44) vm_pu=0.9418 | total_load=1390 kW
-[PGTwin] iter= 855 | EV=  200.0 kW | Load4(Bus44) vm_pu=0.9093 | total_load=1490 kW
-[PGTwin] iter=1260 | EV=  300.0 kW | Load4(Bus44) vm_pu=0.8694 | total_load=1590 kW
+[PGTwin] iter= 401 | EV=  100.0 kW | Bus44 vm_pu=0.9418 | max_line_loading= 80.1% | total_load=1390 kW
+[PGTwin] iter= 855 | EV=  200.0 kW | Bus44 vm_pu=0.9093 | max_line_loading=109.2% | total_load=1490 kW  *** LINE OVERLOAD ***
+[PGTwin] iter=1260 | EV=  300.0 kW | Bus44 vm_pu=0.8694 | max_line_loading=141.4% | total_load=1590 kW  *** LINE OVERLOAD ***
 ```
 
 The grid staircase (0.9418 → 0.9093 → 0.8694 pu) is the same as Attack 7 — confirming that the protocol version changes the message envelope, not the physical outcome.
