@@ -55,8 +55,11 @@ load_linelist = [24, 34, 35, 36, 37, 38, 39]
 # The attack scripts write a plain float (kW) to this shared file every time
 # MeterValues arrive from a charger.  ZSGplussync reads it before each runpp().
 EV_LOAD_FILE    = '/shared/ev_load_kw.txt'   # Docker volume shared with attack
-EV_LOAD_IDX     = 3                           # net.load index for Load4 (Bus 44)
-EV_LOAD_BASELINE_MW = 0.1                     # original Load4 p_mw from create_pgtv2
+# Injection point is env-configurable so the same grid can be targeted at the
+# 0.4 kV "small industry" bus (Load4 / Bus 44 — default, small-site worst case)
+# or a realistic MV charging hub (Load1 / Bus 21, 6.6 kV — Attack 10).
+EV_LOAD_IDX     = int(os.environ.get('EV_LOAD_IDX', '3'))        # net.load index (default Load4/Bus44)
+EV_LOAD_BASELINE_MW = float(os.environ.get('EV_LOAD_BASELINE_MW', '0.1'))  # that load's original p_mw
 
 def read_ev_load_kw() -> float:
     """Return aggregated EV load in kW from shared file, 0.0 if not yet written."""
@@ -370,7 +373,11 @@ if __name__ == "__main__":
 
     iteration = 1
     runpp(net, numba=False)
-    print("[PGTwin] 7-substation grid simulator running. EV load injected at Load4 (Bus 44).")
+    EV_BUS = int(net.load.at[EV_LOAD_IDX, 'bus'])          # bus this load sits on
+    EV_BUS_KV = float(net.bus.at[EV_BUS, 'vn_kv'])
+    EV_LOAD_NAME = str(net.load.at[EV_LOAD_IDX, 'name'])
+    print(f"[PGTwin] 7-substation grid simulator running. "
+          f"EV load injected at {EV_LOAD_NAME} (Bus {EV_BUS}, {EV_BUS_KV} kV).")
     print(f"[PGTwin] Watching: {EV_LOAD_FILE}")
     print(f"[PGTwin] CSV output: {os.environ.get('CSV_DIR', '/shared')}/SimOutput*.csv")
 
@@ -417,11 +424,14 @@ if __name__ == "__main__":
                 buffercurrents.append(val)
 
             # Print grid state for Docker logs
-            ev_bus_vm = vm_pu[44]   # Bus 44 = EV injection point
+            ev_bus_vm = vm_pu[EV_BUS]               # voltage at the EV injection bus
+            line_max  = float(net.res_line.loading_percent.max())   # worst line — thermal overload
+            overload  = "  *** LINE OVERLOAD ***" if line_max >= 100.0 else ""
             print(f"[PGTwin] iter={iteration:4d} | "
-                  f"EV={ev_kw:7.1f} kW | "
-                  f"Load4(Bus44) vm_pu={ev_bus_vm:.4f} | "
-                  f"total_load={net.load.p_mw.sum()*1000:.0f} kW")
+                  f"EV={ev_kw:8.1f} kW | "
+                  f"Bus{EV_BUS} vm_pu={ev_bus_vm:.4f} | "
+                  f"max_line_loading={line_max:5.1f}% | "
+                  f"total_load={net.load.p_mw.sum()*1000:.0f} kW{overload}")
 
             mqtt_publish_voltages(buffervoltages)   # no-op in Docker
 

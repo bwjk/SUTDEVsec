@@ -46,6 +46,7 @@ SUTDEVsec/
 │   ├── attack_overload_grid.py         # Attack 7:  Single EVSE grid overload + PGTwin intro
 │   ├── attack_load_grid.py             # Attack 8:  Coordinated load altering + PGTwin grid
 │   ├── attack_spoof_grid.py            # Attack 9:  Duration spoofing + PGTwin grid
+│   ├── grid_ramp_analysis.py           # Attack 10: Coordinated fleet overload — ramp-to-failure (LV vs MV)
 │   └── a6breakers.py                   # Grid topology visualiser (Plotly HTML)
 └── v201/                           # ── OCPP 2.0.1 tracks ──
     ├── core/                           # SURVIVAL track (plaintext / Profile-1, port 9100)
@@ -337,44 +338,40 @@ The rigorous external-MITM variant adds a **poisoned DNS resolver** so the EVSE 
   CSMS directly and it records the untampered 60 kW. Only the DNS answer changed.
 ```
 
-### PGTwin grid integration (Attacks 7, 8, 9)
+### PGTwin grid integration (Attacks 7, 8, 9, 10)
 
-Attacks 7–9 add a second layer to the topology: a shared Docker volume bridges the OCPP protocol containers to the pandapower grid simulator. The attack container writes a single float (kW) to the volume; pgtwin reads it before every `runpp()` call.
+Attacks 7–10 add a second layer to the topology: a shared Docker volume bridges the OCPP protocol containers to the pandapower grid simulator. The attack container writes a single float (aggregate kW) to the volume; pgtwin reads it before every `runpp()` call. The **injection point is configurable** (`EV_LOAD_IDX`): Attacks 7–9 target the 0.4 kV small-industry bus (LV worst case); Attack 10's `pgtwin-mv` targets the 6.6 kV MV hub (realistic).
 
 ```
   +---------------------------------------------------------------------------+
-  |              pgtwin-shared  *  Docker named volume                        |
-  |                                                                           |
-  |  /shared/ev_load_kw.txt      <- written by attack, read by pgtwin        |
-  |  /shared/SimOutputBus.csv    <- vm_pu45  = Bus 44 voltage (evidence)     |
-  |  /shared/SimOutputLine.csv   <- loading_percent40 = feeder to Load4      |
-  +==========================+================================================+
-                             | reads before each runpp()
-                             v
-           +-----------------------------------------+
-           |  pgtwin  172.19.0.70  (operator-net)    |
-           |  ZSGplussync_docker.py                   |
-           |  7-substation Singapore grid             |
-           |  66 kV -> 22 kV -> 6.6 kV -> 0.4 kV    |
-           |  EV injection : Load4, Bus 44, DS4       |
-           |  Baseline vm_pu = 0.9689                 |
-           +-----------------------------------------+
+  |              pgtwin-shared  *  Docker named volume                         |
+  |  /shared/ev_load_kw.txt      <- aggregate EV kW, written by attack         |
+  |  /shared/SimOutputBus.csv    <- vm_pu  = injection-bus voltage (evidence)  |
+  |  /shared/SimOutputLine.csv   <- loading_percent = feeder loading (evidence)|
+  +==================================+========================================+
+             | reads before runpp()  |  reads before runpp()
+             v                       v
+  +------------------------------+   +------------------------------------+
+  |  pgtwin  172.19.0.70         |   |  pgtwin-mv  172.19.0.71            |
+  |  EV inject: Load4 / Bus 44   |   |  EV inject: Load1 / Bus 21         |
+  |  0.4 kV "small industry"     |   |  6.6 kV MV charging hub            |
+  |  (Attacks 7,8,9 — LV worst)  |   |  (Attack 10 — realistic)           |
+  |  baseline vm_pu = 0.9689     |   |  fails by THERMAL OVERLOAD ~5.5 MW |
+  +------------------------------+   +------------------------------------+
 
-  writes ^                writes ^                writes ^
-         |                       |                       |
-  +------+--------+   +----------+----------+   +--------+-----------------+
-  | atk-overload  |   |  atk-load-grid      |   |  atk-spoof-grid          |
-  | -grid         |   |  172.20.0.41        |   |  172.19.0.42             |
-  | 172.20.0.42   |   |  public-net         |   |  proxy :9004             |
-  | public-net    |   |                     |   |  operator-net            |
-  |               |   |  5-bot OCPP botnet  |   |  drops StopTransaction   |
-  | single rogue  |   |  surge / drop /     |   |  holds phantom load      |
-  | EVSE          |   |  oscillate phases   |   |                          |
-  | 0->66 kW ramp |   |  (Attack 8)         |   |  <- evse-via-spoof-grid  |
-  | (Attack 7)    |   |                     |   |     172.19.0.62          |
-  +---------------+   +---------------------+   |     operator-net         |
-                                                 |     (Attack 9)           |
-                                                 +--------------------------+
+ writes ^         writes ^         writes ^               writes ^
+        |                |                |                      |
+ +------+------+  +------+------+  +------+--------+  +----------+----------+
+ | atk-overload|  | atk-load-   |  | atk-spoof-    |  | atk-overload-fleet  |
+ | -grid       |  | grid        |  | grid          |  | 172.20.0.43         |
+ | 172.20.0.42 |  | 172.20.0.41 |  | 172.19.0.42   |  | public-net          |
+ | public-net  |  | public-net  |  | proxy :9004   |  | 20 x 300 kW DC-fast |
+ | single rogue|  | 5-bot botnet|  | drops StopTxn |  | = 6 MW fleet        |
+ | EVSE        |  | surge/drop/ |  | holds phantom |  | -> feeder >100%     |
+ | 0->300 kW   |  | oscillate   |  | (+evse-via-   |  | (overcurrent trip)  |
+ | (Attack 7)  |  | (Attack 8)  |  |  spoof-grid)  |  | (Attack 10)         |
+ +-------------+  +-------------+  | (Attack 9)    |  +---------------------+
+                                   +---------------+
 ```
 
 ### Threat model per attack
@@ -440,6 +437,10 @@ docker compose --profile load-grid up --build --force-recreate
 
 # Attack 9 — Duration spoofing + PGTwin real grid  (ghost session holds Bus 44 depressed 60 s)
 docker compose --profile spoof-grid up --build --force-recreate
+
+# Attack 10 — Coordinated fleet overload at realistic MV hub  (20x300 kW = 6 MW, feeder >100%)
+docker compose --profile overload-fleet up --build --force-recreate
+python attacks/grid_ramp_analysis.py     # LV-vs-MV ramp-to-failure thresholds + figure (local)
 ```
 
 Drop `--build` on repeat runs if no code has changed.
@@ -1494,6 +1495,53 @@ The 60 s window and 11 kW are demonstrator values; the real attack surface is th
 
 **Root cause:** `StopTransaction` is unsigned; CSMS has no independent disconnect detection; OCPP 1.6 has no session-liveness timeout tied to physical charger state.  
 **Mitigation:** WSS + mutual TLS (prevents MITM interposition); CSMS Heartbeat inactivity timeout; OCPP 2.0.1 signed `StopTransaction`; physical pilot-signal monitoring cross-checked against OCPP session state.
+
+---
+
+### Attack 10 — Coordinated Fleet Overload (realistic MV scale-up)
+
+**Scripts:** `attacks/grid_ramp_analysis.py` (analysis) + `attacks/attack_load_grid.py` (live botnet at scale)  
+**Profile:** `overload-fleet`  
+**Network:** public-net botnet → CSMS; injection at **Load1 / Bus 21 (6.6 kV MV hub)**
+
+Attack 10 answers the realism question raised in review: *one EVSE on a tiny bus is not a credible grid threat.* It is **not a new exploit** — it is the Attack 8 coordinated-load mechanism at **realistic fleet scale and a realistic connection point**, run as a ramp-to-failure study. The key variable is **where the load connects**, not the bot count.
+
+**Injection point matters more than fleet size.** The same PGTwin model is targeted at two buses (`EV_LOAD_IDX` env var): the 0.4 kV small-industry feeder (Bus 44, the previous default) and a 6.6 kV MV hub (Bus 21), where a real charging hub would actually connect.
+
+**Measured ramp-to-failure thresholds** (`python attacks/grid_ramp_analysis.py`):
+
+| Threshold | **Bus 44** — 0.4 kV small feeder (worst case) | **Bus 21** — 6.6 kV MV hub (realistic) |
+|---|---|---|
+| vm_pu < 0.95 (IEC limit) | 75 kW | not reached (≤ 8 MW) |
+| line loading ≥ 100% (thermal overload) | 170 kW | **5.55 MW** |
+| vm_pu < 0.90 (relay risk) | 230 kW | not reached |
+| transformer loading ≥ 100% | not reached | not reached |
+| power-flow **collapse** (non-convergence) | **560 kW** | not reached (≤ 8 MW) |
+
+**The finding (headline):** at a realistic MV connection the binding failure mode is **thermal line overload, not voltage collapse** — a coordinated fleet must reach **~5.5 MW** to drive a feeder past 100% (where overcurrent protection trips and drops the feeder), while bus voltage barely moves. Voltage *collapse* only appears when a hub-scale load is unrealistically concentrated on the tiny 0.4 kV bus (560 kW). This bridges to the paper's Singapore extrapolation: ~5.5 MW overloads one MV feeder, so a 90 MW botnet (10% of a 60,000-charger build-out) could overload many feeders at once.
+
+**Live demonstration through the OCPP→grid coupling:**
+
+```bash
+docker compose --profile overload-fleet up --build --force-recreate
+```
+
+A botnet of 20 HPC DC-fast chargers × 300 kW = **6.0 MW** reports its load over OCPP; `pgtwin-mv` injects it at Bus 21 and logs the feeder overload (verified):
+
+```
+[PGTwin] EV load injected at Load1 (Bus 21, 6.6 kV).
+[PGTwin] iter= 982 | EV=6000.0 kW | Bus21 vm_pu=0.9864 | max_line_loading=106.9% | total_load=7290 kW  *** LINE OVERLOAD ***
+[ATK] Tick 1 | SURGE all 20 bots → 300 kW | total=6000 kW → PGTwin
+```
+
+Note `vm_pu=0.9864` (voltage healthy) with `max_line_loading=106.9%` (feeder overloaded) — exactly the realistic failure mode.
+
+**Honesty / scope:** this is a *static* power flow. "Shutdown" = voltage collapse (non-convergence) **plus** protection thresholds crossed; the model does not trip breakers or cascade on its own (adding line-trip logic to show cascading is a documented future extension). Transformer thermal never binds on this grid (loads are small vs the 25 MVA transformers); the constraints are **line ampacity** (MV) and **bus voltage** (LV) — measured, not assumed. True multi-bus *distribution* of the fleet (vs. repointing to one MV bus) would require extending the single-float `ev_load_kw.txt` contract, and is left as future work.
+
+**Artifacts:** `captures/grid_csv/attack10_ramp_sweep.csv` (full sweep) and `captures/grid_csv/figures/figureE_ramp_to_failure.png` (LV vs. MV, voltage and line-loading vs. injected MW).
+
+**Root cause:** No per-CP rate limiting or signed charging-profile enforcement; the CSMS accepts unbounded aggregate load from cloned chargers.  
+**Mitigation:** OCPP 2.0.1 operator-signed `SetChargingProfile` caps per-CP and aggregate load; CSMS concurrent-connection / load-ramp rate limiting; grid-side ROCOL and overcurrent protection (the realistic backstop — the feeder trips before damage).
 
 ---
 

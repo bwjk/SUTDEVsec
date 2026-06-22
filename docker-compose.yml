@@ -360,6 +360,54 @@ services:
         ipv4_address: 172.19.0.70
     profiles: [overload-grid, load-grid, spoof-grid, v201-overload-grid]
 
+  # ── Attack 10 · Coordinated Fleet Overload @ realistic MV hub ──────────────
+  # Same PGTwin model, but EV load is injected at Load1 / Bus 21 (6.6 kV
+  # industrial, 1.0 MW baseline) — where a real charging hub connects — instead
+  # of the 0.4 kV small-industry Bus 44.  A scaled DC-fast botnet drives the
+  # aggregate load past the feeder's thermal limit (line loading >= 100%),
+  # the realistic failure mode at MV (voltage barely moves).
+  #
+  #   docker compose --profile overload-fleet up --build --force-recreate
+  #
+  # For the LV worst-case bookend and the full ramp-to-failure thresholds + figure:
+  #   python attacks/grid_ramp_analysis.py
+
+  pgtwin-mv:
+    build: .
+    container_name: pgtwin-mv
+    hostname: pgtwin-mv
+    command: python grid/ZSGplussync_docker.py
+    environment:
+      CSV_DIR: /shared
+      EV_LOAD_IDX: "0"                 # Load1 (Bus 21, 6.6 kV MV hub)
+      EV_LOAD_BASELINE_MW: "1.0"       # Load1 original p_mw
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      operator-net:
+        ipv4_address: 172.19.0.71
+    profiles: [overload-fleet]
+
+  atk-overload-fleet:
+    build: .
+    container_name: atk-overload-fleet
+    hostname: atk-overload-fleet
+    # reuses the Attack 8 botnet engine at realistic fleet scale:
+    # 20 HPC DC-fast chargers x 300 kW = 6.0 MW aggregate (crosses the 5.55 MW
+    # MV feeder-overload threshold measured by grid_ramp_analysis.py)
+    command: sh -c "sleep 3 && python attacks/attack_load_grid.py --bots 20 --kw 300 --url ws://csms:9000"
+    environment:
+      EV_LOAD_FILE: /shared/ev_load_kw.txt
+    volumes:
+      - pgtwin-shared:/shared
+    networks:
+      public-net:
+        ipv4_address: 172.20.0.43
+    depends_on:
+      - csms
+      - pgtwin-mv
+    profiles: [overload-fleet]
+
   # ── Attack 7 · Single EVSE Grid Overload + PGTwin ──────────────────────────
   # Threat model: single rogue EVSE on public-net reports inflated MeterValues.
   # Steps from 0 → 11 → 22 → 44 → 66 kW, each held for STEP_DURATION_S seconds.
