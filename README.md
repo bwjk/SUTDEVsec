@@ -1526,7 +1526,9 @@ Attack 10 answers the realism question raised in review: *one EVSE on a tiny bus
 
 **Injection point matters more than fleet size.** The same PGTwin model is targeted at two buses (`EV_LOAD_IDX` env var): the 0.4 kV small-industry feeder (Bus 44, the previous default) and a 6.6 kV MV hub (Bus 21), where a real charging hub would actually connect.
 
-**Measured ramp-to-failure thresholds** (`python attacks/grid_ramp_analysis.py`):
+**How the stress test works** (`attacks/grid_ramp_analysis.py`): unlike the single-level Docker attacks, this *ramps* the coordinated fleet's aggregate load in fine steps (5 kW at LV, 50 kW at MV), solving a full power flow (`runpp`) at every step, and records the load at which each grid limit is **first breached** — bus voltage (IEC 0.95 / 0.90), worst line thermal loading (≥100%), transformer loading (≥100%), and finally non-convergence (voltage collapse). It runs the same sweep at both injection points so the two can be compared directly. The full per-step data is written to `captures/grid_csv/attack10_ramp_sweep.csv` and plotted in **Figure E** (`figureE_ramp_to_failure.png`).
+
+**Measured ramp-to-failure thresholds:**
 
 | Threshold | **Bus 44** — 0.4 kV small feeder (worst case) | **Bus 21** — 6.6 kV MV hub (realistic) |
 |---|---|---|
@@ -1536,7 +1538,14 @@ Attack 10 answers the realism question raised in review: *one EVSE on a tiny bus
 | transformer loading ≥ 100% | not reached | not reached |
 | power-flow **collapse** (non-convergence) | **560 kW** | not reached (≤ 8 MW) |
 
-**The finding (headline):** at a realistic MV connection the binding failure mode is **thermal line overload, not voltage collapse** — a coordinated fleet must reach **~5.5 MW** to drive a feeder past 100% (where overcurrent protection trips and drops the feeder), while bus voltage barely moves. Voltage *collapse* only appears when a hub-scale load is unrealistically concentrated on the tiny 0.4 kV bus (560 kW). This bridges to the paper's Singapore extrapolation: ~5.5 MW overloads one MV feeder, so a 90 MW botnet (10% of a 60,000-charger build-out) could overload many feeders at once.
+**The finding (headline):** at a realistic MV connection the binding failure mode is **thermal line overload, not voltage collapse** — a coordinated fleet must reach **~5.5 MW** to drive a feeder past 100% (where overcurrent protection trips and drops the feeder), while bus voltage barely moves. Voltage *collapse* only appears when a hub-scale load is unrealistically concentrated on the tiny 0.4 kV bus (560 kW).
+
+**Why this matters (significance):**
+
+- **The failure *mode* depends on where the load connects, not how big the fleet is.** At LV the grid fails by **voltage collapse**; at MV by **thermal overload**. A defender (or model) watching only bus voltage would see nothing wrong at a real hub right up until the feeder trips — the threat is real but shows up on a *different* instrument. The script *measures* which constraint binds rather than assuming it (here: voltage at LV, line ampacity at MV; the 25 MVA transformers never bind).
+- **The dramatic LV collapse (560 kW) is a modelling artifact, not a result.** No operator connects a charging hub to a 0.4 kV small-industry feeder; reporting "an EV attack collapses the grid at half a megawatt" would be misleading. Moving the load to where a hub *actually* connects is what makes the number defensible — and turns a scary-but-wrong figure into an honest one.
+- **It quantifies the *real* threat and bridges to scale.** A coordinated fleet needs **multi-MW per feeder** to do damage — ~5.5 MW overloads one MV feeder, so the paper's **90 MW** Singapore botnet (10% of a 60,000-charger build-out) could overload **many feeders simultaneously**. This converts the qualitative "OCPP attack perturbs the grid" claim (Attacks 7–9) into a **quantified, honestly-scoped** grid-impact result.
+- **It reframes the mitigation.** The realistic backstop is grid-side **overcurrent protection** — but a tripped feeder is itself a denial-of-service outcome (the hub and any co-located load go dark). The cyber-side fix is to stop the aggregate from reaching overload in the first place: operator-signed `SetChargingProfile` caps per CP and per feeder, plus CSMS load-ramp rate limiting.
 
 **Live demonstration through the OCPP→grid coupling:**
 
